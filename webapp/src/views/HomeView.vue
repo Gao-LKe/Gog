@@ -76,7 +76,7 @@ onMounted(() => {
         <div class="home-hero-inner">
           <p class="home-hero-kicker">GameBog</p>
           <h1 class="home-hero-title">游戏社区 · 文章 · 话题 · 游戏库</h1>
-          <p class="home-hero-desc">发现热门内容，关注作者动态，用 AI 助手探索社区。</p>
+          <p class="home-hero-desc">发现热门内容，关注作者动态，探索社区。</p>
           <div class="home-hero-actions">
             <RouterLink to="/topics" class="home-btn home-btn-primary">浏览话题</RouterLink>
             <RouterLink to="/editor" class="home-btn">写文章</RouterLink>

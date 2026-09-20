@@ -19,20 +19,19 @@ import (
 const (
 	TopicNotificationPush  = "notification.push"
 	TopicNotificationStore = "notification.store"
-	TopicSearchPush          = "search.push"
-	TopicPointsEarn          = "points.earn"
-	TopicPointsEarnDLQ       = "points.earn.dlq"
-	TopicAgentTurn           = "agent.turn.completed"
+	TopicSearchPush        = "search.push"
+	TopicPointsEarn        = "points.earn"
+	TopicPointsEarnDLQ     = "points.earn.dlq"
 )
 
 type NotificationPayload struct {
-	EventID     uint64 `json:"event_id"`
-	UserID      uint64 `json:"user_id"`
-	SenderID    uint64 `json:"sender_id"`
-	SenderName  string `json:"sender_name"`
-	Content     string `json:"content"`
-	Type        string `json:"type"` // follow, like, system, comment, reply
-	CreatedAt   int64  `json:"created_at"`
+	EventID    uint64 `json:"event_id"`
+	UserID     uint64 `json:"user_id"`
+	SenderID   uint64 `json:"sender_id"`
+	SenderName string `json:"sender_name"`
+	Content    string `json:"content"`
+	Type       string `json:"type"` // follow, like, system, comment, reply
+	CreatedAt  int64  `json:"created_at"`
 	// IsRead 为 true 时表示已通过 WebSocket 送达，落库时记为已读（离线通知默认 false）。
 	IsRead bool `json:"is_read,omitempty"`
 }
@@ -90,7 +89,6 @@ var (
 	searchWriter            *kafka.Writer
 	pointsEarnWriter        *kafka.Writer
 	pointsDLQWriter         *kafka.Writer
-	agentTurnWriter         *kafka.Writer
 )
 
 // pointsEarnConsumerMaxRetries 单条 points.earn 消息最大处理尝试次数（由 InitKafka 注入，默认 3）。
@@ -182,14 +180,6 @@ func InitKafka(brokers []string, groupID string, pointsEarnMaxRetriesArg int) er
 		RequiredAcks: kafka.RequireOne,
 		BatchTimeout: 50 * time.Millisecond,
 	}
-	agentTurnWriter = &kafka.Writer{
-		Addr:         kafka.TCP(brokers...),
-		Topic:        TopicAgentTurn,
-		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: kafka.RequireOne,
-		BatchTimeout: 100 * time.Millisecond,
-	}
-
 	return nil
 }
 
@@ -219,10 +209,6 @@ func CloseKafka() {
 	if pointsDLQWriter != nil {
 		_ = pointsDLQWriter.Close()
 		pointsDLQWriter = nil
-	}
-	if agentTurnWriter != nil {
-		_ = agentTurnWriter.Close()
-		agentTurnWriter = nil
 	}
 }
 
@@ -336,7 +322,7 @@ func consumeLoopPointsEarn(ctx context.Context, brokers []string, groupID string
 		cursorValid         bool
 		curPartition        int
 		curOffset           int64
-		exhausted          bool
+		exhausted           bool
 		failedAttempts      int
 		lastProcErr         error
 	)
@@ -504,13 +490,13 @@ func PublishNotification(userID uint64, senderID uint64, senderName, content str
 	}
 
 	payload, err := json.Marshal(NotificationPayload{
-		EventID:   tool.GenerateID(),
-		UserID:    userID,
-		SenderID:  senderID,
+		EventID:    tool.GenerateID(),
+		UserID:     userID,
+		SenderID:   senderID,
 		SenderName: senderName,
-		Content:   content,
-		Type:      msgType,
-		CreatedAt: time.Now().Unix(),
+		Content:    content,
+		Type:       msgType,
+		CreatedAt:  time.Now().Unix(),
 	})
 	if err != nil {
 		return err
@@ -577,33 +563,4 @@ func PublishPointsEarn(p *PointsEarnPayload) error {
 	}
 	key := []byte(strconv.FormatUint(p.TxnID, 10))
 	return pointsEarnWriter.WriteMessages(context.Background(), kafka.Message{Key: key, Value: payload})
-}
-
-// AgentTurnKafkaAvailable Agent 轮次生命周期 topic writer 是否可用。
-func AgentTurnKafkaAvailable() bool {
-	return agentTurnWriter != nil
-}
-
-// PublishAgentTurn 投递单轮 Agent 生命周期快照（ChatProxy 聚合）。
-func PublishAgentTurn(record any) error {
-	if agentTurnWriter == nil {
-		return errors.New("kafka agent turn writer is not initialized")
-	}
-	payload, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	key := []byte("")
-	var probe struct {
-		RequestID string `json:"request_id"`
-		UserID    uint64 `json:"user_id"`
-	}
-	if json.Unmarshal(payload, &probe) == nil {
-		if probe.RequestID != "" {
-			key = []byte(probe.RequestID)
-		} else if probe.UserID != 0 {
-			key = []byte(strconv.FormatUint(probe.UserID, 10))
-		}
-	}
-	return agentTurnWriter.WriteMessages(context.Background(), kafka.Message{Key: key, Value: payload})
 }

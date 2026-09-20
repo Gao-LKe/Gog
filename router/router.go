@@ -18,11 +18,6 @@ import (
 
 	"github.com/gao66666/GoBlog/database"
 	"github.com/gao66666/GoBlog/handler"
-	"github.com/gao66666/GoBlog/handler/channel"
-	"github.com/gao66666/GoBlog/handler/channel/dingtalk"
-	"github.com/gao66666/GoBlog/handler/channel/feishu"
-	"github.com/gao66666/GoBlog/handler/channel/slack"
-	"github.com/gao66666/GoBlog/handler/channel/wecom"
 	"github.com/gao66666/GoBlog/logger"
 	"github.com/gao66666/GoBlog/middleware"
 	"github.com/gao66666/GoBlog/mq"
@@ -49,9 +44,7 @@ type App struct {
 	PointsHandler            *handler.PointsHandler
 	PointsMallHandler        *handler.PointsMallHandler
 	PointsSvc                *service.PointsService
-	AgentHandler             *handler.AgentHandler
 	InternalHandler          *handler.InternalHandler
-	ChannelHub               *channel.Hub
 }
 
 // StartPeriodicJobs 启动与 Kafka 无关的后台周期任务（例如通知批量落库 ticker、积分对账）。
@@ -159,16 +152,6 @@ func SetupApp(db *gorm.DB, rdb *redis.Client) *App {
 	commentSvc := service.NewCommentService(commentRepo, articleRepo, userRepo, commentRedis, notificationHandler, pointsSvc)
 	topicHandler := handler.NewTopicHandler(topicSvc, followSvc)
 
-	// Agent：短期对话在博客 Redis（与 Agent 侧 Redis 解耦）；聊天经 HTTP SSE ChatProxy
-	agentChatStore := database.NewRedisAgentChatStore(rdb)
-	agentHandler := handler.NewAgentHandler(agentChatStore)
-	channelStore := database.NewChannelStore(rdb)
-	channelHub := channel.NewHub(agentHandler, agentChatStore, channelStore)
-	channelHub.Register(feishu.NewAdapter(feishu.LoadConfigFromEnv()))
-	channelHub.Register(wecom.NewAdapter(wecom.LoadConfigFromEnv()))
-	channelHub.Register(slack.NewAdapter(slack.LoadConfigFromEnv()))
-	channelHub.Register(dingtalk.NewAdapter(dingtalk.LoadConfigFromEnv()))
-
 	return &App{
 		UserHandler:              handler.NewUserHandler(userSvc),
 		ArticleHandler:           handler.NewArticleHandler(articleSvc),
@@ -183,9 +166,7 @@ func SetupApp(db *gorm.DB, rdb *redis.Client) *App {
 		PointsHandler:            pointsHandler,
 		PointsMallHandler:        mallHandler,
 		PointsSvc:                pointsSvc,
-		AgentHandler:             agentHandler,
 		InternalHandler:          handler.NewInternalHandler(gameSvc, topicSvc),
-		ChannelHub:               channelHub,
 	}
 }
 
@@ -238,7 +219,6 @@ func RouterInit(mode string, app *App) *gin.Engine {
 	r.GET("/topics", handler.TopicsPage)
 	r.GET("/topic/:id/discuss", handler.TopicDiscussPage)
 	r.GET("/topic/:id", handler.TopicPage)
-	r.GET("/agent", handler.AgentPage)
 	r.GET("/game-library", handler.GamesLibraryPage)
 	r.GET("/game/:id", handler.GameDetailPage)
 	r.GET("/points-mall", handler.PointsMallPage)
@@ -297,9 +277,6 @@ func registerPublicRoutes(g *gin.RouterGroup, app *App) {
 	g.GET("/points/mall/products", app.PointsMallHandler.ListProducts)
 	g.GET("/points/mall/products/:id", app.PointsMallHandler.GetProduct)
 
-	if app.ChannelHub != nil {
-		app.ChannelHub.MountRoutes(g)
-	}
 }
 
 // registerInternalRoutes 后台运维 API：X-Admin-Key，不经 JWT，前端不调用。
@@ -312,7 +289,6 @@ func registerInternalRoutes(g *gin.RouterGroup, app *App) {
 	{
 		internal.POST("/games", app.InternalHandler.CreateGameInternal)
 		internal.POST("/topics", app.InternalHandler.CreateTopicInternal)
-		internal.POST("/kb/markdown", app.InternalHandler.IngestKBMarkdown)
 	}
 }
 
@@ -344,12 +320,6 @@ func registerProtectedRoutes(g *gin.RouterGroup, app *App) {
 		authGroup.POST("/articles/collect", app.ArticleHandler.CollectArticleHandle)
 		authGroup.DELETE("/articles/collect", app.ArticleHandler.UncollectArticleHandle)
 		authGroup.GET("/articles/collect", app.ArticleHandler.ListMyCollectionsHandle)
-		authGroup.GET("/agent/sessions", app.AgentHandler.SessionsList)
-		authGroup.POST("/agent/sessions", app.AgentHandler.CreateAgentSession)
-		authGroup.DELETE("/agent/sessions/:id", app.AgentHandler.DeleteAgentSession)
-		authGroup.GET("/agent/history", app.AgentHandler.HistoryProxy)
-		authGroup.DELETE("/agent/history", app.AgentHandler.ClearChatHistory)
-		authGroup.POST("/agent/chat", app.AgentHandler.ChatProxy)
 		authGroup.DELETE("/articles/:id", app.ArticleHandler.DeleteArticleHandle)
 		authGroup.POST("/articles/comments", app.CommentHandler.CreateComment)
 		authGroup.DELETE("/articles/comments/:id", app.CommentHandler.DeleteComment)

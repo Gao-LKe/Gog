@@ -13,7 +13,6 @@ log:
   level: "info"
   common_filename: "./logger/common_log/webServer.log"
   error_filename: "./logger/error_log/webServer.log"
-  agent_turn_filename: "./logger/agent_turn_log/agent_turn.log"
   max_size: 200
   max_age: 30
   max_backups: 7

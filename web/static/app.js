@@ -90,10 +90,6 @@
         if (navGameLibrary) {
             navGameLibrary.classList.toggle('nav-active', path === '/game-library' || path.indexOf('/game/') === 0);
         }
-        const navAgent = qs('navAgent');
-        if (navAgent) {
-            navAgent.classList.toggle('nav-active', path === '/agent');
-        }
         if (navMe) {
             navMe.classList.toggle('nav-active', path === '/me');
         }
@@ -237,10 +233,5 @@
             // 登录态：任意页面保持 WS 连接（用于在线状态/通知推送）
             ensureWSConnected();
         });
-
-        // 动态加载 AI 助手侧边栏
-        var as = document.createElement('script');
-        as.src = '/static/agent-sidebar.js';
-        document.body.appendChild(as);
     });
 })();

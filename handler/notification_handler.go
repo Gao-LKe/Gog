@@ -3,10 +3,8 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,20 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// disconnectReasonKey / disconnectReasonIdleValue：服务端 idle 踢线时写入 Session，HandleDisconnect 据此上报 timeout。
-const (
-	disconnectReasonKey       = "disconnect_reason"
-	disconnectReasonIdleValue = "idle_timeout"
-)
-
 type NotificationHandler struct {
 	Meld               *melody.Melody
 	Conns              sync.Map // 存储 key: uint64(UserID), value: *melody.Session
 	idleTimers         sync.Map // 存储 key: uint64(UserID), value: *time.Timer
 	notificationRepo   *database.NotificationRepository
 	redisNotification  *database.RedisNotificationRepository
-	agentMemoryURL     string
-	httpClient         *http.Client
 	sessionIdleTimeout time.Duration
 }
 
@@ -102,9 +92,7 @@ func NewNotificationHandler(notificationRepo *database.NotificationRepository, r
 		Meld:               m,
 		notificationRepo:   notificationRepo,
 		redisNotification:  redisNotification,
-		agentMemoryURL:     strings.TrimRight(os.Getenv("AGENT_URL"), "/"),
-		httpClient:         &http.Client{Timeout: 5 * time.Second},
-		sessionIdleTimeout: time.Duration(getEnvInt("AGENT_SESSION_IDLE_TIMEOUT_SEC", 1800)) * time.Second,
+		sessionIdleTimeout: time.Duration(getSessionIdleTimeoutSec()) * time.Second,
 	}
 
 	// 握手成功后，自动触发这个钩子
@@ -127,15 +115,8 @@ func NewNotificationHandler(notificationRepo *database.NotificationRepository, r
 	m.HandleDisconnect(func(s *melody.Session) {
 		if uid, ok := s.Get("userID"); ok {
 			userID := uid.(uint64)
-			nh.clearMemoryIdleTimer(userID)
+			nh.clearIdleTimer(userID)
 			nh.Conns.Delete(userID)
-			reason := "ws_close"
-			if v, ok := s.Get(disconnectReasonKey); ok {
-				if rs, ok := v.(string); ok && rs == disconnectReasonIdleValue {
-					reason = "timeout"
-				}
-			}
-			go nh.notifyMemorySessionEnd(userID, reason)
 		}
 	})
 
@@ -324,13 +305,12 @@ func (nh *NotificationHandler) forceIdleDisconnect(userID uint64) {
 		nh.Conns.Delete(userID)
 		return
 	}
-	s.Set(disconnectReasonKey, disconnectReasonIdleValue)
 	if err := s.Close(); err != nil {
 		zap.L().Warn("空闲超时关闭 WebSocket 失败", zap.Uint64("uid", userID), zap.Error(err))
 	}
 }
 
-func (nh *NotificationHandler) clearMemoryIdleTimer(userID uint64) {
+func (nh *NotificationHandler) clearIdleTimer(userID uint64) {
 	if nh == nil || userID == 0 {
 		return
 	}
@@ -341,23 +321,15 @@ func (nh *NotificationHandler) clearMemoryIdleTimer(userID uint64) {
 	}
 }
 
-func (nh *NotificationHandler) notifyMemorySessionEnd(userID uint64, reason string) {
-	if nh == nil || nh.agentMemoryURL == "" || userID == 0 {
-		return
+func getSessionIdleTimeoutSec() int {
+	const defaultTimeoutSec = 1800
+	raw := os.Getenv("WS_SESSION_IDLE_TIMEOUT_SEC")
+	if raw == "" {
+		return defaultTimeoutSec
 	}
-	body, _ := json.Marshal(map[string]interface{}{
-		"user_id": userID,
-		"reason":  reason,
-	})
-	req, err := http.NewRequest("POST", nh.agentMemoryURL+"/memory/session-end", strings.NewReader(string(body)))
-	if err != nil {
-		return
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return defaultTimeoutSec
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := nh.httpClient.Do(req)
-	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
+	return value
 }
-

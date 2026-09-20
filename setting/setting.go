@@ -55,13 +55,12 @@ type RedisConfig struct {
 }
 
 type LogConfig struct {
-	Level              string `mapstructure:"level"`
-	Common_filename    string `mapstructure:"common_filename"`
-	Error_filename     string `mapstructure:"error_filename"`
-	AgentTurnFilename string `mapstructure:"agent_turn_filename"`
-	MaxSize            int    `mapstructure:"max_size"`
-	MaxAge             int    `mapstructure:"max_age"`
-	MaxBackups         int    `mapstructure:"max_backups"`
+	Level           string `mapstructure:"level"`
+	Common_filename string `mapstructure:"common_filename"`
+	Error_filename  string `mapstructure:"error_filename"`
+	MaxSize         int    `mapstructure:"max_size"`
+	MaxAge          int    `mapstructure:"max_age"`
+	MaxBackups      int    `mapstructure:"max_backups"`
 }
 
 type MessageQueueConfig struct {
@@ -100,8 +99,8 @@ type SearchConfig struct {
 }
 
 type SecurityConfig struct {
-	RateLimitPerMinute int    `mapstructure:"rate_limit_per_minute"`
-	RateLimitBurst     int    `mapstructure:"rate_limit_burst"`
+	RateLimitPerMinute int `mapstructure:"rate_limit_per_minute"`
+	RateLimitBurst     int `mapstructure:"rate_limit_burst"`
 	// AdminAPISecret 非空时，/api/v1/internal/* 须在请求头携带 X-Admin-Key 与之相同。
 	AdminAPISecret string `mapstructure:"admin_api_secret"`
 }

@@ -28,7 +28,6 @@ function logout() {
         <RouterLink to="/" :class="{ 'nav-active': isActive('/') }">首页</RouterLink>
         <RouterLink to="/topics" :class="{ 'nav-active': isActive('/topics') }">话题</RouterLink>
         <RouterLink to="/game-library" :class="{ 'nav-active': isActive('/game-library') }">游戏库</RouterLink>
-        <RouterLink to="/agent" :class="{ 'nav-active': isActive('/agent') }">AI 助手</RouterLink>
         <RouterLink v-if="auth.isLoggedIn" to="/me" :class="{ 'nav-active': isActive('/me') }">个人中心</RouterLink>
         <RouterLink v-if="!auth.isLoggedIn" to="/login" :class="{ 'nav-active': isActive('/login') }">登录</RouterLink>
         <button v-else type="button" class="nav-logout" @click="logout">退出</button>

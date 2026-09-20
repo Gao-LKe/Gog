@@ -77,10 +77,6 @@ func TopicDiscussPage(c *gin.Context) {
 	servePage(c, "topic_discuss.tmpl", gin.H{"TopicID": c.Param("id")})
 }
 
-func AgentPage(c *gin.Context) {
-	servePage(c, "agent.tmpl", gin.H{})
-}
-
 func GamesLibraryPage(c *gin.Context) {
 	servePage(c, "game_library.tmpl", gin.H{})
 }

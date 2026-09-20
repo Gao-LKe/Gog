@@ -33,9 +33,6 @@ func Init(cfg *setting.LogConfig, mode string) (err error) {
 
 	lg = zap.New(core, zap.AddCaller())
 	zap.ReplaceGlobals(lg)
-	if err := initAgentTurnLogger(cfg); err != nil {
-		return err
-	}
-	zap.L().Info("init logger success", zap.String("mode", mode), zap.String("agent_turn_log", cfg.AgentTurnFilename))
+	zap.L().Info("init logger success", zap.String("mode", mode))
 	return
 }

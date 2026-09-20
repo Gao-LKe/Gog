@@ -14,7 +14,6 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     { path: '/editor', name: 'editor', component: () => import('@/views/EditorView.vue'), meta: { requiresAuth: true } },
-    { path: '/agent', name: 'agent', component: () => import('@/views/AgentView.vue') },
     { path: '/dm', name: 'dm', component: () => import('@/views/DMView.vue'), meta: { requiresAuth: true } },
     { path: '/topics', name: 'topics', component: () => import('@/views/TopicsView.vue') },
     { path: '/topic/:id/discuss', name: 'topic-discuss', component: () => import('@/views/TopicDiscussView.vue') },

@@ -30,21 +30,11 @@ services:
       - MQ_NSQ_ENABLED=true
       - MQ_NSQ_ADDR=nsqd:4150
       - SEARCH_ENABLED=false
-      - AGENT_URL=http://host.docker.internal:9091
-      # 飞书机器人（可选）：开放平台自建应用 + 事件订阅 im.message.receive_v1
-      # - FEISHU_APP_ID=
-      # - FEISHU_APP_SECRET=
-      # - FEISHU_VERIFICATION_TOKEN=
-      # - FEISHU_ENCRYPT_KEY=
       - AUTH_JWT_SECRET=change-me-in-production
     depends_on:
       mysql:
         condition: service_started
       redis:
-        condition: service_started
-      mongodb:
-        condition: service_started
-      qdrant:
         condition: service_started
       kafka:
         # 勿用 service_healthy：镜像内 healthcheck 易失败会导致 compose 永久卡在 Waiting
@@ -100,8 +90,6 @@ services:
       mysql:
         condition: service_started
       redis:
-        condition: service_started
-      mongodb:
         condition: service_started
       kafka:
         condition: service_started
@@ -193,38 +181,6 @@ services:
       resources:
         limits:
           memory: 512M
-
-  # MongoDB: 长期记忆的结构化事实存储
-  mongodb:
-    image: mongo:7
-    container_name: blog-mongodb
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=123456
-    volumes:
-      - mongodb_data:/data/db
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-
-  # Qdrant: 长期记忆的向量检索存储
-  qdrant:
-    image: qdrant/qdrant:v1.18.0
-    container_name: blog-qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    deploy:
-      resources:
-        limits:
-          memory: 1G
 
   # Kafka: 替代 Asynq，用于通知推送/搜索同步等异步任务
   kafka:
@@ -323,8 +279,6 @@ services:
 volumes:
   mysql_data:
   redis_data:
-  mongodb_data:
-  qdrant_data:
   kafka_data:
   es_data:
   go-mod-cache:
