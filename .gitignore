@@ -1,40 +1,22 @@
-# --- 编译产物 ---
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# 本地协作记录
+.Agent/
 
-# --- Go ---
-GoBlog.exe
-*.test
-*.out
-vendor/
+# 环境配置
+.env
+*.local
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-*.egg
-dist/
-build/
+# Go
+backend/bin/
+backend/coverage.out
+backend/api
+backend/api.exe
 
-# --- 日志 ---
-*.log
-logger/**/*.log
+# Vue / Vite
+frontend/node_modules/
+frontend/dist/
 
-# --- IDE / 系统 ---
+# IDE / 系统
 .idea/
-.vs/
 .vscode/
-*.swp
-*.swo
-*~
 .DS_Store
 Thumbs.db
-
-# --- 其他 ---
-.../
-.continue/
-.Agent/
