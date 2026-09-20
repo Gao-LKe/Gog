@@ -1,4 +1,4 @@
-name: commerce-foundation
+name: game-code-marketplace
 
 services:
   mysql:
