@@ -16,7 +16,7 @@ const router = createRouter({
 })
 
 router.afterEach((to) => {
-  document.title = `${String(to.meta.title ?? '首页')} · 游戏激活码售卖平台`
+  document.title = `${String(to.meta.title ?? '首页')} · 软件激活码售卖与交易平台`
 })
 
 export default router

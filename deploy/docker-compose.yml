@@ -1,4 +1,4 @@
-name: game-code-marketplace
+name: software-license-marketplace
 
 services:
   mysql:

@@ -13,8 +13,8 @@ const navigation = [
   <div class="app-shell">
     <header class="app-header">
       <RouterLink class="brand" to="/login">
-        <span class="brand-mark">G</span>
-        <span>游戏激活码售卖平台</span>
+        <span class="brand-mark">S</span>
+        <span>软件激活码售卖与交易平台</span>
       </RouterLink>
       <nav class="nav-list" aria-label="主导航">
         <RouterLink v-for="item in navigation" :key="item.path" :to="item.path" class="nav-link">
