@@ -1,6 +1,11 @@
 package store
 
-import "time"
+import (
+	"strconv"
+	"time"
+
+	"gorm.io/gorm"
+)
 
 //===========================================
 //      身份与会话
@@ -13,9 +18,30 @@ type User struct {
 	PhoneVerifiedAt *time.Time
 	Email           *string `gorm:"size:254;uniqueIndex:uk_users_email"`
 	EmailVerifiedAt *time.Time
+	PasswordHash    []byte    `gorm:"type:varbinary(60)"`
+	Role            string    `gorm:"size:16;not null;default:user;index"`
 	Status          string    `gorm:"size:24;not null;default:active;index:idx_users_status_created,priority:1"`
 	CreatedAt       time.Time `gorm:"index:idx_users_status_created,priority:2"`
 	UpdatedAt       time.Time
+}
+
+const registrationBonusFen uint64 = 50_000
+
+// AfterCreate grants the development-only registration balance in the caller's
+// transaction. Only password-based user registrations qualify; seed data and
+// externally imported users must create their balances explicitly.
+func (u *User) AfterCreate(tx *gorm.DB) error {
+	if u.Role != "user" || len(u.PasswordHash) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	if err := tx.Create(&UserBalance{UserID: u.ID, AvailableFen: registrationBonusFen, UpdatedAt: now}).Error; err != nil {
+		return err
+	}
+	return tx.Create(&BalanceTransaction{
+		UserID: u.ID, Type: "registration_bonus", AmountFen: int64(registrationBonusFen), BalanceAfterFen: registrationBonusFen,
+		ReferenceType: "registration", ReferenceID: strconv.FormatUint(u.ID, 10), CreatedAt: now,
+	}).Error
 }
 
 type ExternalAccount struct {
@@ -38,6 +64,29 @@ type UserSession struct {
 }
 
 //===========================================
+//===========================================
+//      用户余额
+//===========================================
+
+type UserBalance struct {
+	UserID       uint64    `gorm:"primaryKey"`
+	AvailableFen uint64    `gorm:"not null;default:0"`
+	UpdatedAt    time.Time `gorm:"not null"`
+	User         User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+}
+
+type BalanceTransaction struct {
+	ID              uint64    `gorm:"primaryKey"`
+	UserID          uint64    `gorm:"not null;index:idx_balance_transactions_user_created,priority:1"`
+	Type            string    `gorm:"size:32;not null"`
+	AmountFen       int64     `gorm:"not null"`
+	BalanceAfterFen uint64    `gorm:"not null"`
+	ReferenceType   string    `gorm:"size:32;not null;uniqueIndex:uk_balance_transactions_reference,priority:1"`
+	ReferenceID     string    `gorm:"size:64;not null;uniqueIndex:uk_balance_transactions_reference,priority:2"`
+	CreatedAt       time.Time `gorm:"not null;index:idx_balance_transactions_user_created,priority:2"`
+	User            User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+}
+
 //      商品与激活码库存
 //===========================================
 
@@ -138,6 +187,7 @@ type OrderItem struct {
 type PaymentAttempt struct {
 	ID                  uint64  `gorm:"primaryKey"`
 	PaymentNo           string  `gorm:"size:40;not null;uniqueIndex:uk_payment_attempts_payment_no"`
+	PaymentMethod       string  `gorm:"size:24;not null;default:balance"`
 	OrderID             uint64  `gorm:"not null;index"`
 	BuyerUserID         uint64  `gorm:"not null;uniqueIndex:uk_payment_attempts_buyer_idempotency,priority:1"`
 	WeChatOutTradeNo    string  `gorm:"column:wechat_out_trade_no;size:64;not null;uniqueIndex:uk_payment_attempts_wechat_out_trade_no"`
@@ -258,7 +308,7 @@ type ConversationMessage struct {
 
 func Models() []any {
 	return []any{
-		&User{}, &ExternalAccount{}, &UserSession{},
+		&User{}, &ExternalAccount{}, &UserSession{}, &UserBalance{}, &BalanceTransaction{},
 		&SoftwareProduct{}, &LicenseListing{}, &ActivationCode{}, &ActivationCodeVerification{},
 		&ShoppingCartItem{}, &Order{}, &OrderItem{}, &PaymentAttempt{}, &PaymentCallbackEvent{},
 		&OrderItemActivationCode{}, &ActivationCodeDelivery{}, &SellerSettlement{}, &SellerEarning{}, &OutboxEvent{},

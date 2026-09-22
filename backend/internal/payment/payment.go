@@ -6,10 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +22,7 @@ var (
 	ErrInvalidRequest      = errors.New("invalid payment request")
 	ErrOrderUnavailable    = errors.New("order is not available for payment")
 	ErrIdempotencyConflict = errors.New("idempotency key belongs to another order")
-	ErrPaymentInProgress   = errors.New("order already has an active payment")
+	ErrInsufficientBalance = errors.New("insufficient balance")
 )
 
 type CreateRequest struct {
@@ -36,73 +35,35 @@ type CreateResult struct {
 	Status    string `json:"status"`
 }
 
-// Provider only creates a channel-side payment object. Confirmation remains
-// channel-driven, so a browser response can never mark an order as paid.
-type Provider interface {
-	Create(context.Context, string, uint64) error
+type BalanceView struct {
+	AvailableFen uint64 `json:"available_fen"`
 }
 
-type StubProvider struct{ sequence uint64 }
+type Service struct{ db *gorm.DB }
 
-func (p *StubProvider) Create(_ context.Context, _ string, _ uint64) error {
-	atomic.AddUint64(&p.sequence, 1)
-	return nil
-}
+// The optional argument keeps the previous constructor call site source-compatible
+// while the external-channel adapter is intentionally disabled for balance payment.
+func NewService(db *gorm.DB, _ ...any) *Service { return &Service{db: db} }
 
-type Service struct {
-	db       *gorm.DB
-	provider Provider
-}
-
-func NewService(db *gorm.DB, provider Provider) *Service {
-	if provider == nil {
-		provider = &StubProvider{}
-	}
-	return &Service{db: db, provider: provider}
-}
-
-// Create persists the payment attempt before communicating with a channel.
-// The amount comes exclusively from the order snapshot, never from the client.
+// Create pays an order with the buyer's stored balance. Balance deduction,
+// payment confirmation and the lifecycle Outbox record share one transaction.
 func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey string, req CreateRequest) (CreateResult, error) {
 	if s.db == nil || buyerID == 0 || strings.TrimSpace(req.OrderNo) == "" || strings.TrimSpace(idempotencyKey) == "" {
 		return CreateResult{}, ErrInvalidRequest
 	}
 
-	attempt, existing, err := s.createAttempt(ctx, buyerID, strings.TrimSpace(idempotencyKey), strings.TrimSpace(req.OrderNo))
-	if err != nil {
-		return CreateResult{}, err
-	}
-	if existing {
-		return resultFromAttempt(attempt), nil
-	}
-
-	if err := s.provider.Create(ctx, attempt.WeChatOutTradeNo, attempt.AmountFen); err != nil {
-		_ = s.db.WithContext(ctx).Model(&store.PaymentAttempt{}).Where("id = ? AND status = ?", attempt.ID, "creating").Update("status", "provider_failed").Error
-		return CreateResult{}, err
-	}
-	if err := s.markChannelCreated(ctx, attempt.ID); err != nil {
-		return CreateResult{}, err
-	}
-	attempt.Status = "pending"
-	return resultFromAttempt(attempt), nil
-}
-
-func (s *Service) createAttempt(ctx context.Context, buyerID uint64, idempotencyKey, orderNo string) (store.PaymentAttempt, bool, error) {
 	var attempt store.PaymentAttempt
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var order store.Order
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("order_no = ? AND buyer_user_id = ?", orderNo, buyerID).First(&order).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("order_no = ? AND buyer_user_id = ?", strings.TrimSpace(req.OrderNo), buyerID).First(&order).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrOrderUnavailable
 			}
 			return err
 		}
-		if order.Status != "pending_payment" {
-			return ErrOrderUnavailable
-		}
 
 		var keyed store.PaymentAttempt
-		if err := tx.Where("buyer_user_id = ? AND idempotency_key = ?", buyerID, idempotencyKey).First(&keyed).Error; err == nil {
+		if err := tx.Where("buyer_user_id = ? AND idempotency_key = ?", buyerID, strings.TrimSpace(idempotencyKey)).First(&keyed).Error; err == nil {
 			if keyed.OrderID != order.ID {
 				return ErrIdempotencyConflict
 			}
@@ -112,45 +73,64 @@ func (s *Service) createAttempt(ctx context.Context, buyerID uint64, idempotency
 			return err
 		}
 
-		// The order row lock serializes different idempotency keys for one order.
-		var active store.PaymentAttempt
-		if err := tx.Where("order_id = ? AND status IN ?", order.ID, []string{"creating", "pending"}).Order("id DESC").First(&active).Error; err == nil {
-			return ErrPaymentInProgress
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		if order.Status != "pending_payment" {
+			return ErrOrderUnavailable
 		}
 
-		paymentNo, err := newReference("pay")
+		var balance store.UserBalance
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&balance, "user_id = ?", buyerID).Error; err != nil {
+			return err
+		}
+		if balance.AvailableFen < order.TotalAmountFen {
+			return ErrInsufficientBalance
+		}
+
+		paymentNo, err := newReference("bal")
 		if err != nil {
 			return err
 		}
-		attempt = store.PaymentAttempt{PaymentNo: paymentNo, OrderID: order.ID, BuyerUserID: buyerID, WeChatOutTradeNo: paymentNo, AmountFen: order.TotalAmountFen, IdempotencyKey: idempotencyKey, Status: "creating", ExpiresAt: order.ExpiresAt}
-		return tx.Create(&attempt).Error
+		now := time.Now().UTC()
+		balance.AvailableFen -= order.TotalAmountFen
+		if err := tx.Model(&balance).Updates(map[string]any{"available_fen": balance.AvailableFen, "updated_at": now}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&store.BalanceTransaction{
+			UserID: buyerID, Type: "order_payment", AmountFen: -int64(order.TotalAmountFen), BalanceAfterFen: balance.AvailableFen,
+			ReferenceType: "order", ReferenceID: strconv.FormatUint(order.ID, 10), CreatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		attempt = store.PaymentAttempt{
+			PaymentNo: paymentNo, PaymentMethod: "balance", OrderID: order.ID, BuyerUserID: buyerID, WeChatOutTradeNo: paymentNo,
+			AmountFen: order.TotalAmountFen, IdempotencyKey: strings.TrimSpace(idempotencyKey), Status: "succeeded", ExpiresAt: order.ExpiresAt,
+		}
+		if err := tx.Create(&attempt).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&order).Updates(map[string]any{"status": "paid", "paid_at": now}).Error; err != nil {
+			return err
+		}
+		payload, err := json.Marshal(contracts.PaymentLifecycleEvent{EventID: paymentNo, PaymentID: paymentNo, OrderID: order.OrderNo, Type: "payment.succeeded", AmountCents: int64(order.TotalAmountFen)})
+		if err != nil {
+			return err
+		}
+		return tx.Create(&store.OutboxEvent{EventID: paymentNo, Topic: contracts.PaymentLifecycleTopic, AggregateType: "payment_attempt", AggregateID: paymentNo, Payload: payload, OccurredAt: now}).Error
 	})
 	if err != nil {
-		return store.PaymentAttempt{}, false, err
+		return CreateResult{}, err
 	}
-	return attempt, attempt.Status != "creating", nil
+	return resultFromAttempt(attempt), nil
 }
 
-func (s *Service) markChannelCreated(ctx context.Context, paymentAttemptID uint64) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var attempt store.PaymentAttempt
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&attempt, paymentAttemptID).Error; err != nil {
-			return err
-		}
-		if attempt.Status != "creating" {
-			return nil
-		}
-		payload, err := json.Marshal(contracts.PaymentLifecycleEvent{EventID: attempt.PaymentNo, PaymentID: attempt.PaymentNo, OrderID: fmt.Sprint(attempt.OrderID), Type: "payment.created", AmountCents: int64(attempt.AmountFen)})
-		if err != nil {
-			return err
-		}
-		if err := tx.Model(&attempt).Update("status", "pending").Error; err != nil {
-			return err
-		}
-		return tx.Create(&store.OutboxEvent{EventID: attempt.PaymentNo, Topic: contracts.PaymentLifecycleTopic, AggregateType: "payment_attempt", AggregateID: attempt.PaymentNo, Payload: payload, OccurredAt: time.Now().UTC()}).Error
-	})
+func (s *Service) Balance(ctx context.Context, userID uint64) (BalanceView, error) {
+	if s.db == nil || userID == 0 {
+		return BalanceView{}, ErrInvalidRequest
+	}
+	var balance store.UserBalance
+	if err := s.db.WithContext(ctx).First(&balance, "user_id = ?", userID).Error; err != nil {
+		return BalanceView{}, err
+	}
+	return BalanceView{AvailableFen: balance.AvailableFen}, nil
 }
 
 func resultFromAttempt(attempt store.PaymentAttempt) CreateResult {
@@ -166,6 +146,20 @@ func newReference(prefix string) (string, error) {
 }
 
 func RegisterRoutes(r *gin.RouterGroup, service *Service) {
+	r.GET("/balance", func(c *gin.Context) {
+		user, ok := c.Get("auth.user")
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+		balance, err := service.Balance(c.Request.Context(), user.(store.User).ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read balance failed"})
+			return
+		}
+		c.JSON(http.StatusOK, balance)
+	})
+
 	r.POST("/payments", func(c *gin.Context) {
 		var req CreateRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -182,13 +176,13 @@ func RegisterRoutes(r *gin.RouterGroup, service *Service) {
 			switch {
 			case errors.Is(err, ErrInvalidRequest), errors.Is(err, ErrIdempotencyConflict):
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			case errors.Is(err, ErrOrderUnavailable), errors.Is(err, ErrPaymentInProgress):
+			case errors.Is(err, ErrOrderUnavailable), errors.Is(err, ErrInsufficientBalance):
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			default:
-				c.JSON(http.StatusBadGateway, gin.H{"error": "payment provider is unavailable"})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "balance payment failed"})
 			}
 			return
 		}
-		c.JSON(http.StatusAccepted, result)
+		c.JSON(http.StatusOK, result)
 	})
 }
