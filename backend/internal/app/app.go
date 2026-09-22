@@ -28,7 +28,7 @@ func New(cfg config.Config, deps platform.Dependencies) *App {
 	api := r.Group("/api/v1")
 	api.Use(auth.Require(auth.NewJWTVerifier(cfg.AuthSecret)))
 	auth.RegisterRoutes(api)
-	payment.RegisterRoutes(api, payment.NewService(nil, deps.Kafka))
+	payment.RegisterRoutes(api, payment.NewService(deps.Gorm, nil))
 	realtime.RegisterRoutes(api, realtime.NewHub())
 	return &App{Config: cfg, Router: r}
 }
