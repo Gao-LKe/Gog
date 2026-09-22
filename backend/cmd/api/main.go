@@ -6,6 +6,7 @@ import (
 	"github.com/goblog/backend/internal/app"
 	"github.com/goblog/backend/internal/config"
 	"github.com/goblog/backend/internal/platform"
+	"github.com/goblog/backend/internal/store"
 )
 
 func main() {
@@ -15,6 +16,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer clients.Close()
+	if err := store.Migrate(clients.Gorm); err != nil {
+		log.Fatal(err)
+	}
 	a := app.New(cfg, clients.Dependencies)
 	log.Printf("api listening on %s", a.Config.HTTPAddr)
 	if err := a.Run(); err != nil {

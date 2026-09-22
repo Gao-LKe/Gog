@@ -10,6 +10,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 // The platform interfaces keep infrastructure construction outside feature
@@ -31,6 +33,7 @@ type Dependencies struct {
 	MySQL MySQLClient
 	Redis RedisClient
 	Kafka KafkaProducer
+	Gorm  *gorm.DB
 }
 
 type Clients struct {
@@ -47,11 +50,16 @@ func Open(mysqlDSN, redisAddr, kafkaBrokers string) (*Clients, error) {
 	db.SetMaxOpenConns(40)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
+	gormDB, err := gorm.Open(mysql.New(mysql.Config{Conn: db}), &gorm.Config{})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	producer := NewKafkaProducer(kafkaBrokers)
 	return &Clients{
-		Dependencies: Dependencies{MySQL: db, Redis: redisAdapter{rdb}, Kafka: producer},
+		Dependencies: Dependencies{MySQL: db, Redis: redisAdapter{rdb}, Kafka: producer, Gorm: gormDB},
 		mysql:        db,
 		redis:        rdb,
 	}, nil
