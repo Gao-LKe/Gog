@@ -25,8 +25,8 @@ func SeedMockData(db *gorm.DB) error {
 		buyerPhone := "13800000002"
 		sellerEmail := "seller@example.test"
 		buyerEmail := "buyer@example.test"
-		seller := User{DisplayName: "寄售卖家", Phone: &sellerPhone, PhoneVerifiedAt: &now, Email: &sellerEmail, Status: "active"}
-		buyer := User{DisplayName: "购买用户", Phone: &buyerPhone, PhoneVerifiedAt: &now, Email: &buyerEmail, Status: "active"}
+		seller := User{ID: 803113126182400001, DisplayName: "寄售卖家", Phone: &sellerPhone, PhoneVerifiedAt: &now, Email: &sellerEmail, Status: "active"}
+		buyer := User{ID: 803113126182400002, DisplayName: "购买用户", Phone: &buyerPhone, PhoneVerifiedAt: &now, Email: &buyerEmail, Status: "active"}
 		if err := tx.Create(&seller).Error; err != nil {
 			return err
 		}
@@ -34,11 +34,13 @@ func SeedMockData(db *gorm.DB) error {
 			return err
 		}
 		account := ExternalAccount{UserID: seller.ID, Provider: "mock-oauth", ProviderSubject: "seller-001", LinkedAt: now}
-		session := UserSession{ID: "00000000-0000-0000-0000-000000000011", UserID: buyer.ID, RefreshTokenHash: []byte("12345678901234567890123456789012"), ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now}
 		if err := tx.Create(&account).Error; err != nil {
 			return err
 		}
-		if err := tx.Create(&session).Error; err != nil {
+		if err := tx.Create(&UserAccess{UserID: seller.ID, CanBuy: true, CanChat: true, CanSell: true, CanHandleTicket: true, CanManageUser: true, CanManageSystem: true}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&UserAccess{UserID: buyer.ID, CanBuy: true, CanChat: true, CanSell: true, CanHandleTicket: true, CanManageUser: true, CanManageSystem: true}).Error; err != nil {
 			return err
 		}
 
@@ -118,7 +120,7 @@ func SeedMockData(db *gorm.DB) error {
 		if err := tx.Create(&conversation).Error; err != nil {
 			return err
 		}
-		message := ConversationMessage{ConversationID: conversation.ID, SenderUserID: buyer.ID, ClientMessageID: "00000000-0000-0000-0000-000000000021", Content: "你好，还在吗？"}
+		message := ConversationMessage{ConversationID: conversation.ID, SenderUserID: buyer.ID, RecipientUserID: seller.ID, ClientMessageID: "00000000-0000-0000-0000-000000000021", Content: "你好，还在吗？"}
 		return tx.Create(&message).Error
 	})
 }

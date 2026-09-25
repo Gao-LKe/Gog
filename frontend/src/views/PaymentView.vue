@@ -1,22 +1,21 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue'
+import OrderRequestForm from '../components/payment/OrderRequestForm.vue'
+import OrderRequestStatus from '../components/payment/OrderRequestStatus.vue'
+import { useOrderCreation, type OrderDraft } from '../composables/useOrderCreation'
 
-const paymentState = shallowRef('待接入支付服务')
+const { state, submit, pay } = useOrderCreation()
 
-function initialize() {
-  paymentState.value = '支付流程边界已初始化'
+function submitOrder(draft: OrderDraft) {
+  void submit(draft)
 }
 </script>
 
 <template>
   <section class="feature-page">
     <div class="eyebrow">03 / PAYMENT</div>
-    <h1>支付基础架构</h1>
-    <p class="lead">围绕支付意图、幂等入口与状态事件保留最小前端承载层。</p>
-    <div class="panel status-panel">
-      <div class="metric"><span class="metric-label">模块状态</span><strong>{{ paymentState }}</strong></div>
-      <div class="metric"><span class="metric-label">核心依赖</span><strong>MySQL · Redis · Kafka</strong></div>
-      <button type="button" @click="initialize">初始化支付边界</button>
-    </div>
+    <h1>下单与余额支付</h1>
+    <p class="lead">请求先进入 Kafka；仅在订单、库存预占已经提交到 MySQL 后，才展示真实订单和付款按钮。</p>
+    <OrderRequestForm :disabled="state.status === 'processing' || state.status === 'paying'" @submit="submitOrder" />
+    <OrderRequestStatus :state="state" @pay="pay" />
   </section>
 </template>

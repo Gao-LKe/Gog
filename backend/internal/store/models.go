@@ -12,7 +12,7 @@ import (
 //===========================================
 
 type User struct {
-	ID              uint64  `gorm:"primaryKey"`
+	ID              uint64  `gorm:"primaryKey;autoIncrement:false"`
 	DisplayName     string  `gorm:"size:80;not null"`
 	Phone           *string `gorm:"size:32;uniqueIndex:uk_users_phone"`
 	PhoneVerifiedAt *time.Time
@@ -53,17 +53,59 @@ type ExternalAccount struct {
 	User            User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
 }
 
-type UserSession struct {
-	ID               string    `gorm:"size:36;primaryKey"`
-	UserID           uint64    `gorm:"not null;index:idx_user_sessions_user_expiry,priority:1"`
-	RefreshTokenHash []byte    `gorm:"type:varbinary(32);not null;uniqueIndex:uk_user_sessions_refresh_token"`
-	ExpiresAt        time.Time `gorm:"not null;index:idx_user_sessions_user_expiry,priority:2"`
-	RevokedAt        *time.Time
-	CreatedAt        time.Time `gorm:"not null"`
-	User             User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+// UserAccess stores the durable allow/deny facts for the fixed permission
+// vocabulary. A false value is fail-closed and must have a current restriction
+// record when it represents a temporary or operator-imposed denial.
+type UserAccess struct {
+	UserID          uint64 `gorm:"primaryKey;autoIncrement:false"`
+	CanBuy          bool   `gorm:"not null;default:true"`
+	CanChat         bool   `gorm:"not null;default:true"`
+	CanSell         bool   `gorm:"not null;default:true"`
+	CanHandleTicket bool   `gorm:"not null;default:true"`
+	CanManageUser   bool   `gorm:"not null;default:true"`
+	CanManageSystem bool   `gorm:"not null;default:true"`
+	UpdatedAt       time.Time
+	User            User `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
 }
 
-//===========================================
+// UserPermissionRestriction is the current explanation for a denied access
+// field. Historical changes belong to UserAccountEvent.
+type UserPermissionRestriction struct {
+	ID             uint64     `gorm:"primaryKey"`
+	UserID         uint64     `gorm:"not null;uniqueIndex:uk_user_permission_restrictions_user_permission,priority:1;index:idx_user_permission_restrictions_active_expiry,priority:1"`
+	PermissionCode string     `gorm:"size:48;not null;uniqueIndex:uk_user_permission_restrictions_user_permission,priority:2"`
+	Active         bool       `gorm:"not null;default:true;index:idx_user_permission_restrictions_active_expiry,priority:2"`
+	Reason         string     `gorm:"size:500"`
+	OperatorUserID *uint64    `gorm:"index"`
+	StartsAt       time.Time  `gorm:"not null"`
+	ExpiresAt      *time.Time `gorm:"index:idx_user_permission_restrictions_active_expiry,priority:3"`
+	UpdatedAt      time.Time
+	User           User `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+}
+
+// UserAccountEvent is append-only security and account-change history. It is
+// intentionally separate from the current user and access facts.
+type UserAccountEvent struct {
+	ID             uint64    `gorm:"primaryKey"`
+	UserID         uint64    `gorm:"not null;index:idx_user_account_events_user_created,priority:1"`
+	EventType      string    `gorm:"size:64;not null"`
+	OperatorUserID *uint64   `gorm:"index"`
+	Detail         string    `gorm:"type:text"`
+	CreatedAt      time.Time `gorm:"not null;index:idx_user_account_events_user_created,priority:2"`
+	User           User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+}
+
+// UserLoginEvent records successful login/session-establishment events. Online
+// session state itself exists only in Redis.
+type UserLoginEvent struct {
+	ID         uint64    `gorm:"primaryKey"`
+	UserID     uint64    `gorm:"not null;index:idx_user_login_events_user_created,priority:1"`
+	Method     string    `gorm:"size:32;not null"`
+	DeviceType string    `gorm:"size:12;not null"`
+	CreatedAt  time.Time `gorm:"not null;index:idx_user_login_events_user_created,priority:2"`
+	User       User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
+}
+
 //===========================================
 //      用户余额
 //===========================================
@@ -87,6 +129,7 @@ type BalanceTransaction struct {
 	User            User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:UserID"`
 }
 
+//===========================================
 //      商品与激活码库存
 //===========================================
 
@@ -116,12 +159,15 @@ type LicenseListing struct {
 }
 
 type ActivationCode struct {
-	ID                   uint64 `gorm:"primaryKey"`
-	ListingID            uint64 `gorm:"not null;index:idx_activation_codes_listing_status,priority:1"`
-	SecretCiphertext     []byte `gorm:"type:mediumblob;not null"`
-	SecretFingerprint    []byte `gorm:"type:varbinary(32);not null;uniqueIndex:uk_activation_codes_fingerprint"`
-	EncryptionKeyVersion string `gorm:"size:32;not null"`
-	Status               string `gorm:"size:32;not null;default:submitted;index:idx_activation_codes_listing_status,priority:2"`
+	ID                   uint64     `gorm:"primaryKey"`
+	ListingID            uint64     `gorm:"not null;index:idx_activation_codes_listing_status,priority:1"`
+	SecretCiphertext     []byte     `gorm:"type:mediumblob;not null"`
+	SecretFingerprint    []byte     `gorm:"type:varbinary(32);not null;uniqueIndex:uk_activation_codes_fingerprint"`
+	EncryptionKeyVersion string     `gorm:"size:32;not null"`
+	Status               string     `gorm:"size:32;not null;default:submitted;index:idx_activation_codes_listing_status,priority:2"`
+	ReservedOrderID      *uint64    `gorm:"index:idx_activation_codes_reserved_order"`
+	ReservedOrderItemID  *uint64    `gorm:"index:idx_activation_codes_reserved_order_item"`
+	ReservedUntil        *time.Time `gorm:"index"`
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 	Listing              LicenseListing `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:ListingID"`
@@ -151,6 +197,19 @@ type ShoppingCartItem struct {
 	UpdatedAt time.Time      `gorm:"index:idx_cart_user_updated,priority:2"`
 	User      User           `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:CASCADE;foreignKey:UserID"`
 	Listing   LicenseListing `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:CASCADE;foreignKey:ListingID"`
+}
+
+type OrderCreationRequest struct {
+	RequestID      string `gorm:"size:64;primaryKey"`
+	BuyerUserID    uint64 `gorm:"not null;uniqueIndex:uk_order_creation_requests_buyer_idempotency,priority:1"`
+	IdempotencyKey string `gorm:"size:128;not null;uniqueIndex:uk_order_creation_requests_buyer_idempotency,priority:2"`
+	Status         string `gorm:"size:24;not null;index:idx_order_creation_requests_status_updated,priority:1"`
+	OrderID        *uint64
+	RejectReason   string `gorm:"size:128"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time `gorm:"index:idx_order_creation_requests_status_updated,priority:2"`
+	Buyer          User      `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:BuyerUserID"`
+	Order          *Order    `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:OrderID"`
 }
 
 type Order struct {
@@ -296,21 +355,24 @@ type Conversation struct {
 }
 
 type ConversationMessage struct {
-	ID              uint64       `gorm:"primaryKey"`
-	ConversationID  uint64       `gorm:"not null;uniqueIndex:uk_messages_client,priority:1;index:idx_messages_conversation_id,priority:1"`
-	SenderUserID    uint64       `gorm:"not null;uniqueIndex:uk_messages_client,priority:2"`
-	ClientMessageID string       `gorm:"size:36;not null;uniqueIndex:uk_messages_client,priority:3"`
-	Content         string       `gorm:"type:text;not null"`
-	CreatedAt       time.Time    `gorm:"index:idx_messages_conversation_id,priority:2"`
+	ID              uint64 `gorm:"primaryKey"`
+	ConversationID  uint64 `gorm:"not null;uniqueIndex:uk_messages_client,priority:1;index:idx_messages_conversation_id,priority:1"`
+	SenderUserID    uint64 `gorm:"not null;uniqueIndex:uk_messages_client,priority:2;index:idx_messages_sender_created,priority:1"`
+	RecipientUserID uint64 `gorm:"not null;index:idx_messages_recipient_created,priority:1"`
+	ClientMessageID string `gorm:"size:36;not null;uniqueIndex:uk_messages_client,priority:3"`
+	Content         string `gorm:"type:text;not null"`
+	ReceivedAt      *time.Time
+	CreatedAt       time.Time    `gorm:"index:idx_messages_conversation_id,priority:2;index:idx_messages_sender_created,priority:2;index:idx_messages_recipient_created,priority:2"`
 	Conversation    Conversation `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:ConversationID"`
 	Sender          User         `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:SenderUserID"`
+	Recipient       User         `gorm:"constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT;foreignKey:RecipientUserID"`
 }
 
 func Models() []any {
 	return []any{
-		&User{}, &ExternalAccount{}, &UserSession{}, &UserBalance{}, &BalanceTransaction{},
+		&User{}, &ExternalAccount{}, &UserAccess{}, &UserPermissionRestriction{}, &UserAccountEvent{}, &UserLoginEvent{}, &UserBalance{}, &BalanceTransaction{},
 		&SoftwareProduct{}, &LicenseListing{}, &ActivationCode{}, &ActivationCodeVerification{},
-		&ShoppingCartItem{}, &Order{}, &OrderItem{}, &PaymentAttempt{}, &PaymentCallbackEvent{},
+		&ShoppingCartItem{}, &OrderCreationRequest{}, &Order{}, &OrderItem{}, &PaymentAttempt{}, &PaymentCallbackEvent{},
 		&OrderItemActivationCode{}, &ActivationCodeDelivery{}, &SellerSettlement{}, &SellerEarning{}, &OutboxEvent{},
 		&DerivativeListing{}, &Conversation{}, &ConversationMessage{},
 	}

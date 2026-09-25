@@ -12,7 +12,7 @@ import (
 
 func TestBalancePaymentDebitsOnceAndMarksOrderPaid(t *testing.T) {
 	db := paymentTestDB(t)
-	buyer := store.User{DisplayName: "buyer", Status: "active"}
+	buyer := store.User{ID: 803113126182420001, DisplayName: "buyer", Status: "active"}
 	if err := db.Create(&buyer).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +21,18 @@ func TestBalancePaymentDebitsOnceAndMarksOrderPaid(t *testing.T) {
 	}
 	order := store.Order{OrderNo: "ORDER-001", BuyerUserID: buyer.ID, TotalAmountFen: 19_900, Status: "pending_payment"}
 	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	listing := store.LicenseListing{SourceType: "official", Title: "测试激活码", UnitPriceFen: 19_900, Status: "active"}
+	if err := db.Create(&listing).Error; err != nil {
+		t.Fatal(err)
+	}
+	item := store.OrderItem{OrderID: order.ID, ListingID: listing.ID, SourceType: listing.SourceType, TitleSnapshot: listing.Title, UnitPriceFen: listing.UnitPriceFen, Quantity: 1, LineAmountFen: listing.UnitPriceFen, Status: "pending_payment"}
+	if err := db.Create(&item).Error; err != nil {
+		t.Fatal(err)
+	}
+	code := store.ActivationCode{ListingID: listing.ID, SecretCiphertext: []byte("ciphertext"), SecretFingerprint: []byte("01234567890123456789012345678901"), EncryptionKeyVersion: "test", Status: "reserved", ReservedOrderID: &order.ID, ReservedOrderItemID: &item.ID}
+	if err := db.Create(&code).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -39,20 +51,22 @@ func TestBalancePaymentDebitsOnceAndMarksOrderPaid(t *testing.T) {
 
 	var balance store.UserBalance
 	var storedOrder store.Order
-	var attempts, ledgerEntries, events int64
+	var storedCode store.ActivationCode
+	var attempts, ledgerEntries, bindings int64
 	db.First(&balance, "user_id = ?", buyer.ID)
 	db.First(&storedOrder, "id = ?", order.ID)
 	db.Model(&store.PaymentAttempt{}).Count(&attempts)
 	db.Model(&store.BalanceTransaction{}).Count(&ledgerEntries)
-	db.Model(&store.OutboxEvent{}).Count(&events)
-	if balance.AvailableFen != 30_100 || storedOrder.Status != "paid" || storedOrder.PaidAt == nil || attempts != 1 || ledgerEntries != 1 || events != 1 {
-		t.Fatalf("balance=%d order=%+v attempts=%d ledger=%d events=%d", balance.AvailableFen, storedOrder, attempts, ledgerEntries, events)
+	db.First(&storedCode, "id = ?", code.ID)
+	db.Model(&store.OrderItemActivationCode{}).Count(&bindings)
+	if balance.AvailableFen != 30_100 || storedOrder.Status != "paid" || storedOrder.PaidAt == nil || storedCode.Status != "sold" || attempts != 1 || ledgerEntries != 1 || bindings != 1 {
+		t.Fatalf("balance=%d order=%+v code=%+v attempts=%d ledger=%d bindings=%d", balance.AvailableFen, storedOrder, storedCode, attempts, ledgerEntries, bindings)
 	}
 }
 
 func TestBalancePaymentRejectsInsufficientFundsWithoutMutation(t *testing.T) {
 	db := paymentTestDB(t)
-	buyer := store.User{DisplayName: "buyer", Status: "active"}
+	buyer := store.User{ID: 803113126182420002, DisplayName: "buyer", Status: "active"}
 	if err := db.Create(&buyer).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +75,18 @@ func TestBalancePaymentRejectsInsufficientFundsWithoutMutation(t *testing.T) {
 	}
 	order := store.Order{OrderNo: "ORDER-001", BuyerUserID: buyer.ID, TotalAmountFen: 101, Status: "pending_payment"}
 	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	listing := store.LicenseListing{SourceType: "official", Title: "测试激活码", UnitPriceFen: 101, Status: "active"}
+	if err := db.Create(&listing).Error; err != nil {
+		t.Fatal(err)
+	}
+	item := store.OrderItem{OrderID: order.ID, ListingID: listing.ID, SourceType: listing.SourceType, TitleSnapshot: listing.Title, UnitPriceFen: listing.UnitPriceFen, Quantity: 1, LineAmountFen: listing.UnitPriceFen, Status: "pending_payment"}
+	if err := db.Create(&item).Error; err != nil {
+		t.Fatal(err)
+	}
+	code := store.ActivationCode{ListingID: listing.ID, SecretCiphertext: []byte("ciphertext"), SecretFingerprint: []byte("11234567890123456789012345678901"), EncryptionKeyVersion: "test", Status: "reserved", ReservedOrderID: &order.ID, ReservedOrderItemID: &item.ID}
+	if err := db.Create(&code).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +107,7 @@ func paymentTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&store.User{}, &store.UserBalance{}, &store.BalanceTransaction{}, &store.Order{}, &store.PaymentAttempt{}, &store.OutboxEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.User{}, &store.UserBalance{}, &store.BalanceTransaction{}, &store.LicenseListing{}, &store.ActivationCode{}, &store.Order{}, &store.OrderItem{}, &store.OrderItemActivationCode{}, &store.PaymentAttempt{}); err != nil {
 		t.Fatal(err)
 	}
 	return db

@@ -1,25 +1,19 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue'
+import RealtimeConnectionPanel from '../components/realtime/RealtimeConnectionPanel.vue'
+import RealtimeMessageComposer from '../components/realtime/RealtimeMessageComposer.vue'
+import RealtimeMessageList from '../components/realtime/RealtimeMessageList.vue'
+import { useRealtimeChat } from '../composables/useRealtimeChat'
 
-const connectionState = shallowRef<'idle' | 'ready'>('idle')
-
-function prepareConnection() {
-  connectionState.value = 'ready'
-}
+const { connectionState, connectionLabel, status, messages, connect, send } = useRealtimeChat()
 </script>
 
 <template>
   <section class="feature-page">
     <div class="eyebrow">02 / REALTIME</div>
-    <h1>实时通信基础架构</h1>
-    <p class="lead">预留 WebSocket 连接管理、心跳、鉴权和 Kafka 事件分发的接入点。</p>
-    <div class="panel status-panel">
-      <span class="status-dot" :class="{ active: connectionState === 'ready' }" />
-      <div>
-        <strong>{{ connectionState === 'ready' ? '连接层已准备' : '等待连接层' }}</strong>
-        <p>当前仅展示基础状态，不建立真实长连接。</p>
-      </div>
-      <button type="button" @click="prepareConnection">准备连接</button>
-    </div>
+    <h1>实时通信</h1>
+    <p class="lead">建立连接后同步最近 15 条收发消息；实时席位不足或连接关闭时，自动使用 HTTP 继续同步和发送。</p>
+    <RealtimeConnectionPanel :state="connectionState" :label="connectionLabel" :status="status" @connect="connect" />
+    <RealtimeMessageComposer @send="send" />
+    <RealtimeMessageList :messages="messages" />
   </section>
 </template>

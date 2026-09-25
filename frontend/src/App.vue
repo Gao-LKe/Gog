@@ -5,7 +5,7 @@ const navigation = [
   { label: '鉴权', path: '/login' },
   { label: '通信', path: '/realtime' },
   { label: '支付', path: '/payment' },
-  { label: '系统防护', path: '/system' },
+  { label: '系统监测', path: '/system' },
 ]
 </script>
 

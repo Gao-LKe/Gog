@@ -1,23 +1,18 @@
 <script setup lang="ts">
-import { computed, shallowRef } from 'vue'
-
-const protectionEnabled = shallowRef(false)
-const protectionLabel = computed(() => protectionEnabled.value ? '防护策略已启用' : '等待后端策略接入')
+import MonitoringDashboard from '../components/monitoring/MonitoringDashboard.vue'
 </script>
 
 <template>
-  <section class="feature-page">
-    <div class="eyebrow">04 / RESILIENCE</div>
-    <h1>系统防护基础架构</h1>
-    <p class="lead">以可替换边界承载限流、并发隔离和熔断，业务降级策略留待后续接入。</p>
-    <div class="panel protection-grid">
-      <div v-for="item in ['流量控制', '并发隔离', '故障降级']" :key="item" class="protection-item">
-        <span class="status-dot" :class="{ active: protectionEnabled }" />
-        <span>{{ item }}</span>
-      </div>
-      <button type="button" @click="protectionEnabled = !protectionEnabled">
-        {{ protectionLabel }}
-      </button>
-    </div>
+  <section class="feature-page monitoring-page">
+    <div class="eyebrow">04 / MONITORING</div>
+    <h1>系统运行监测</h1>
+    <p class="lead">查看服务接口、订单队列与数据库的实时状态。统计仅用于观察，不会自动调整流量或处理速度。</p>
+    <MonitoringDashboard />
   </section>
 </template>
+
+<style scoped>
+.monitoring-page { max-width: 100%; }
+.monitoring-page h1 { max-width: none; }
+.monitoring-page .lead { max-width: 760px; }
+</style>

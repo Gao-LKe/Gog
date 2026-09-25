@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/goblog/backend/internal/contracts"
 	"github.com/goblog/backend/internal/store"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -45,8 +43,8 @@ type Service struct{ db *gorm.DB }
 // while the external-channel adapter is intentionally disabled for balance payment.
 func NewService(db *gorm.DB, _ ...any) *Service { return &Service{db: db} }
 
-// Create pays an order with the buyer's stored balance. Balance deduction,
-// payment confirmation and the lifecycle Outbox record share one transaction.
+// Create confirms an already-reserved order with the buyer's stored balance.
+// Balance, payment record and reserved activation-code ownership share one transaction.
 func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey string, req CreateRequest) (CreateResult, error) {
 	if s.db == nil || buyerID == 0 || strings.TrimSpace(req.OrderNo) == "" || strings.TrimSpace(idempotencyKey) == "" {
 		return CreateResult{}, ErrInvalidRequest
@@ -73,7 +71,23 @@ func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey str
 			return err
 		}
 
-		if order.Status != "pending_payment" {
+		now := time.Now().UTC()
+		if order.Status != "pending_payment" || (order.ExpiresAt != nil && !order.ExpiresAt.After(now)) {
+			return ErrOrderUnavailable
+		}
+		var orderItems []store.OrderItem
+		if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+			return err
+		}
+		var expectedCodeCount uint
+		for _, item := range orderItems {
+			expectedCodeCount += item.Quantity
+		}
+		var codes []store.ActivationCode
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("reserved_order_id = ? AND status = ?", order.ID, "reserved").Find(&codes).Error; err != nil {
+			return err
+		}
+		if expectedCodeCount == 0 || len(codes) != int(expectedCodeCount) {
 			return ErrOrderUnavailable
 		}
 
@@ -89,7 +103,6 @@ func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey str
 		if err != nil {
 			return err
 		}
-		now := time.Now().UTC()
 		balance.AvailableFen -= order.TotalAmountFen
 		if err := tx.Model(&balance).Updates(map[string]any{"available_fen": balance.AvailableFen, "updated_at": now}).Error; err != nil {
 			return err
@@ -110,11 +123,18 @@ func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey str
 		if err := tx.Model(&order).Updates(map[string]any{"status": "paid", "paid_at": now}).Error; err != nil {
 			return err
 		}
-		payload, err := json.Marshal(contracts.PaymentLifecycleEvent{EventID: paymentNo, PaymentID: paymentNo, OrderID: order.OrderNo, Type: "payment.succeeded", AmountCents: int64(order.TotalAmountFen)})
-		if err != nil {
-			return err
+		for _, code := range codes {
+			if code.ReservedOrderItemID == nil {
+				return ErrOrderUnavailable
+			}
+			if err := tx.Create(&store.OrderItemActivationCode{OrderItemID: *code.ReservedOrderItemID, ActivationCodeID: code.ID, BoundAt: now}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&store.ActivationCode{}).Where("id = ? AND status = ?", code.ID, "reserved").Updates(map[string]any{"status": "sold", "reserved_order_id": nil, "reserved_order_item_id": nil, "reserved_until": nil}).Error; err != nil {
+				return err
+			}
 		}
-		return tx.Create(&store.OutboxEvent{EventID: paymentNo, Topic: contracts.PaymentLifecycleTopic, AggregateType: "payment_attempt", AggregateID: paymentNo, Payload: payload, OccurredAt: now}).Error
+		return tx.Model(&store.OrderItem{}).Where("order_id = ? AND status = ?", order.ID, "pending_payment").Update("status", "paid").Error
 	})
 	if err != nil {
 		return CreateResult{}, err

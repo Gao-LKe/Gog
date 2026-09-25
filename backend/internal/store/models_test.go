@@ -44,8 +44,8 @@ func runAllTablesCRUD(t *testing.T, db *gorm.DB) {
 	}
 
 	var seller, buyer User
+	var sellerAccess, buyerAccess UserAccess
 	var account ExternalAccount
-	var session UserSession
 	var product SoftwareProduct
 	var listing LicenseListing
 	var consignmentListing LicenseListing
@@ -68,8 +68,9 @@ func runAllTablesCRUD(t *testing.T, db *gorm.DB) {
 
 	readFirst(t, db, &seller, "display_name = ?", "寄售卖家")
 	readFirst(t, db, &buyer, "display_name = ?", "购买用户")
+	readFirst(t, db, &sellerAccess, "user_id = ?", seller.ID)
+	readFirst(t, db, &buyerAccess, "user_id = ?", buyer.ID)
 	readFirst(t, db, &account, "provider_subject = ?", "seller-001")
-	readFirst(t, db, &session, "id = ?", "00000000-0000-0000-0000-000000000011")
 	readFirst(t, db, &product, "name = ?", "Mock OS Pro")
 	readFirst(t, db, &listing, "title = ?", "Mock OS Pro 官方激活码")
 	readFirst(t, db, &consignmentListing, "title = ?", "Mock OS Pro 寄售激活码")
@@ -94,7 +95,6 @@ func runAllTablesCRUD(t *testing.T, db *gorm.DB) {
 	update(t, db, &seller, "display_name", "卖家已更新")
 	update(t, db, &buyer, "display_name", "买家已更新")
 	update(t, db, &account, "linked_at", updated)
-	update(t, db, &session, "revoked_at", updated)
 	update(t, db, &product, "description", "更新后的软件说明")
 	update(t, db, &listing, "description", "更新后的上架说明")
 	update(t, db, &code, "status", "reserved")
@@ -133,7 +133,8 @@ func runAllTablesCRUD(t *testing.T, db *gorm.DB) {
 	deleteOne(t, db, &listing)
 	deleteOne(t, db, &product)
 	deleteOne(t, db, &account)
-	deleteOne(t, db, &session)
+	deleteOne(t, db, &buyerAccess)
+	deleteOne(t, db, &sellerAccess)
 	deleteOne(t, db, &buyer)
 	deleteOne(t, db, &seller)
 }

@@ -10,6 +10,7 @@
 body { margin: 0; min-width: 320px; }
 button, input { font: inherit; }
 button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .6; }
 .app-shell { min-height: 100vh; background: radial-gradient(circle at 80% 0%, #19354d 0, transparent 34rem), #0b1118; }
 .app-header { display: flex; align-items: center; justify-content: space-between; gap: 2rem; max-width: 1180px; margin: 0 auto; padding: 1.5rem 2rem; }
 .brand { display: flex; align-items: center; gap: .75rem; color: #f3f7fb; font-weight: 700; text-decoration: none; }
@@ -28,7 +29,14 @@ label, .metric-label { color: #9cafc0; font-size: .8rem; }
 input { width: 100%; padding: .8rem 1rem; border: 1px solid #344c5d; border-radius: .5rem; color: #f3f7fb; background: #0f1b25; outline: none; }
 input:focus { border-color: #7fe1c1; }
 button { width: fit-content; padding: .7rem 1rem; border: 0; border-radius: .5rem; color: #071017; background: #7fe1c1; font-weight: 700; }
+button.secondary { border: 1px solid #344c5d; color: #c6d2dc; background: transparent; }
 small { color: #71879a; }
+.mode-switch, .code-row { display: flex; gap: .6rem; align-items: center; }
+.code-row input { min-width: 0; }
+.code-row button { flex: 0 0 auto; white-space: nowrap; }
+.provider-note { margin-top: 1rem; color: #71879a; font-size: .85rem; }
+.chat-message { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #263a49; }
+.chat-message p { margin: .35rem 0 0; white-space: pre-wrap; }
 .status-panel, .protection-grid { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
 .status-panel > div { flex: 1; }
 .status-panel p { margin: .35rem 0 0; color: #71879a; }

@@ -11,7 +11,7 @@ const router = createRouter({
     { path: '/login', component: LoginView, meta: { title: '鉴权' } },
     { path: '/realtime', component: RealtimeView, meta: { title: '通信' } },
     { path: '/payment', component: PaymentView, meta: { title: '支付' } },
-    { path: '/system', component: SystemView, meta: { title: '系统防护' } },
+    { path: '/system', component: SystemView, meta: { title: '系统监测' } },
   ],
 })
 

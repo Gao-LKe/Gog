@@ -15,7 +15,7 @@ func TestPasswordRegistrationGetsBonusBalance(t *testing.T) {
 	if err := db.AutoMigrate(&User{}, &UserBalance{}, &BalanceTransaction{}); err != nil {
 		t.Fatal(err)
 	}
-	user := User{DisplayName: "新用户", PasswordHash: []byte("password-hash"), Role: "user", Status: "active"}
+	user := User{ID: 803113126182400003, DisplayName: "新用户", PasswordHash: []byte("password-hash"), Role: "user", Status: "active"}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatal(err)
 	}
