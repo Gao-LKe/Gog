@@ -10,6 +10,7 @@ backend/bin/
 backend/coverage.out
 backend/api
 backend/api.exe
+artifacts/loadtest/
 
 # Vue / Vite
 frontend/node_modules/

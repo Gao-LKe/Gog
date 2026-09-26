@@ -31,7 +31,7 @@ type App struct {
 func New(cfg config.Config, deps platform.Dependencies) *App {
 	r := gin.New()
 	metrics := monitoring.NewMetrics()
-	r.Use(metrics.HTTPMiddleware(), protection.Recovery(), protection.RequestID(), protection.Middleware(protection.NewFixedWindowLimiter(120, 60_000_000_000)))
+	r.Use(metrics.HTTPMiddleware(), protection.Recovery(), protection.RequestID(), protection.Middleware(protection.NewFixedWindowLimiter(cfg.RateLimitPerIP, time.Minute)))
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	r.GET("/readyz", readiness(deps))
 

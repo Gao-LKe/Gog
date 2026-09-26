@@ -10,3 +10,10 @@ func TestValidateRejectsInvalidSnowflakeNodeID(t *testing.T) {
 		}
 	}
 }
+
+func TestFromEnvReadsRateLimitPerIP(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_IP", "3600")
+	if cfg := FromEnv(); cfg.RateLimitPerIP != 3600 {
+		t.Fatalf("rate limit = %d, want 3600", cfg.RateLimitPerIP)
+	}
+}

@@ -30,6 +30,7 @@ type Config struct {
 	SMTPFrom                 string
 	BootstrapAdminEmail      string
 	SnowflakeNodeID          int64
+	RateLimitPerIP           int
 	RealtimeMaxConnections   int
 	RealtimeFallbackCooldown time.Duration
 	MySQLDSN                 string
@@ -65,6 +66,7 @@ func FromEnv() Config {
 		SMTPFrom:                 strings.TrimSpace(os.Getenv("SMTP_FROM")),
 		BootstrapAdminEmail:      strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL")),
 		SnowflakeNodeID:          snowflakeNodeIDFromEnv(),
+		RateLimitPerIP:           positiveIntOrDefault("RATE_LIMIT_PER_IP", 120),
 		RealtimeMaxConnections:   positiveIntOrDefault("REALTIME_MAX_CONNECTIONS", 1000),
 		RealtimeFallbackCooldown: durationOrDefault("REALTIME_FALLBACK_COOLDOWN", time.Minute),
 		MySQLDSN:                 valueOrDefault("MYSQL_DSN", "shop:shop_dev_password@tcp(localhost:3306)/shop_core?parseTime=true"),
@@ -85,6 +87,9 @@ func (c Config) Validate() error {
 	}
 	if c.SnowflakeNodeID < 0 || c.SnowflakeNodeID > 1023 {
 		return errors.New("SNOWFLAKE_NODE_ID must be between 0 and 1023")
+	}
+	if c.RateLimitPerIP <= 0 {
+		return errors.New("rate limit per IP must be positive")
 	}
 	if c.RealtimeMaxConnections <= 0 || c.RealtimeFallbackCooldown <= 0 {
 		return errors.New("realtime connection limit and fallback cooldown must be positive")

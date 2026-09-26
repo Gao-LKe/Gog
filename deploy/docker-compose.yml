@@ -66,6 +66,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      RATE_LIMIT_PER_IP: ${RATE_LIMIT_PER_IP:-120}
       MYSQL_DSN: shop:${MYSQL_PASSWORD:-shop_dev_password}@tcp(mysql:3306)/shop_core?parseTime=true
       REDIS_ADDR: redis:6379
       KAFKA_BROKERS: kafka:9092
@@ -73,6 +74,32 @@ services:
       - "8081:8080"
     expose:
       - "9091"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  loadtest:
+    build: ../backend
+    profiles: ["loadtest"]
+    entrypoint: ["/loadtest"]
+    environment:
+      APP_ENV: development
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret}
+      AUTH_ISSUER: ${AUTH_ISSUER:-goblog}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:-goblog-api}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-720h}
+      EMAIL_CODE_TTL: ${EMAIL_CODE_TTL:-5m}
+      EMAIL_MODE: log
+      MYSQL_DSN: shop:${MYSQL_PASSWORD:-shop_dev_password}@tcp(mysql:3306)/shop_core?parseTime=true
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+    volumes:
+      - ../artifacts/loadtest:/artifacts/loadtest
     depends_on:
       mysql:
         condition: service_healthy
