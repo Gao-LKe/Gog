@@ -17,3 +17,12 @@ func TestFromEnvReadsRateLimitPerIP(t *testing.T) {
 		t.Fatalf("rate limit = %d, want 3600", cfg.RateLimitPerIP)
 	}
 }
+
+func TestFromEnvReadsOrderWorkerSettings(t *testing.T) {
+	t.Setenv("ORDER_CONSUMER_WORKERS", "6")
+	t.Setenv("ORDER_TOPIC_PARTITIONS", "12")
+	cfg := FromEnv()
+	if cfg.OrderConsumerWorkers != 6 || cfg.OrderTopicPartitions != 12 {
+		t.Fatalf("order workers=%d partitions=%d, want 6 and 12", cfg.OrderConsumerWorkers, cfg.OrderTopicPartitions)
+	}
+}

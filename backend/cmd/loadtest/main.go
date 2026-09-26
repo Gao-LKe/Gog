@@ -37,17 +37,20 @@ import (
 )
 
 const (
-	profileVersion     = 1
+	profileVersion     = 3
 	loadtestPassword   = "LoadtestOnly!123"
 	defaultHTTPTimeout = 10 * time.Second
 )
 
 type profile struct {
-	Version   int           `json:"version"`
-	CreatedAt time.Time     `json:"created_at"`
-	ListingID uint64        `json:"listing_id"`
-	CodeCount int           `json:"code_count"`
-	Users     []profileUser `json:"users"`
+	Version           int           `json:"version"`
+	CreatedAt         time.Time     `json:"created_at"`
+	ListingID         uint64        `json:"listing_id"`
+	ListingIDs        []uint64      `json:"listing_ids"`
+	HotListingCount   int           `json:"hot_listing_count"`
+	HotRequestPercent int           `json:"hot_request_percent"`
+	CodeCount         int           `json:"code_count"`
+	Users             []profileUser `json:"users"`
 }
 
 // profileUser deliberately has no password or database connection settings.
@@ -56,6 +59,34 @@ type profile struct {
 type profileUser struct {
 	UserID      uint64 `json:"user_id"`
 	AccessToken string `json:"access_token"`
+}
+
+func (p profile) listingIDs() []uint64 {
+	if len(p.ListingIDs) > 0 {
+		return p.ListingIDs
+	}
+	return []uint64{p.ListingID}
+}
+
+// listingIDForRequest returns a deterministic, evenly spread weighted mix.
+// For example, five hot listings with a 30% share put three hot and seven
+// ordinary requests in every ten-request window, without a burst of hot keys.
+func (p profile) listingIDForRequest(index int) uint64 {
+	listingIDs := p.listingIDs()
+	if p.HotListingCount <= 0 || p.HotRequestPercent <= 0 {
+		return listingIDs[index%len(listingIDs)]
+	}
+
+	windowIndex := index % 100
+	hotBefore := (windowIndex * p.HotRequestPercent) / 100
+	hotAfter := ((windowIndex + 1) * p.HotRequestPercent) / 100
+	if hotAfter > hotBefore {
+		hotRequestIndex := (index/100)*p.HotRequestPercent + hotBefore
+		return listingIDs[hotRequestIndex%p.HotListingCount]
+	}
+	ordinaryListingCount := len(listingIDs) - p.HotListingCount
+	ordinaryRequestIndex := (index/100)*(100-p.HotRequestPercent) + (windowIndex - hotBefore)
+	return listingIDs[p.HotListingCount+ordinaryRequestIndex%ordinaryListingCount]
 }
 
 type runReport struct {
@@ -72,9 +103,11 @@ type phaseReport struct {
 	Duration                time.Duration  `json:"target_duration"`
 	Launched                int            `json:"launched"`
 	Received                int            `json:"received"`
+	ClientResponses         int            `json:"client_responses"`
 	Succeeded               int            `json:"succeeded"`
 	Responses               map[string]int `json:"responses"`
 	RequestQPS              float64        `json:"request_qps"`
+	InputDuration           time.Duration  `json:"input_duration"`
 	TransactionTPS          float64        `json:"transaction_tps,omitempty"`
 	CreatedTPS              float64        `json:"created_tps,omitempty"`
 	P50MS                   *float64       `json:"http_p50_ms,omitempty"`
@@ -113,6 +146,9 @@ func main() {
 	metricsURL := flag.String("metrics-url", "", "应用指标地址，例如 http://localhost:9091/metrics")
 	users := flag.Int("users", 100, "seed 时创建的测试用户数")
 	codes := flag.Int("codes", 10000, "seed 时创建的可售激活码数")
+	listings := flag.Int("listings", 1, "seed 时创建的商品数，用于分散库存锁竞争")
+	hotListings := flag.Int("hot-listings", 0, "热点商品数量；0 表示所有商品均匀分流")
+	hotRequestPercent := flag.Int("hot-request-percent", 0, "热点商品合计承担的请求百分比；0 表示均匀分流")
 	orderRate := flag.Int("order-rate", 0, "下单目标请求数/秒；0 表示跳过")
 	orderDuration := flag.Duration("order-duration", time.Minute, "下单发送时长")
 	paymentRate := flag.Int("payment-rate", 0, "支付目标请求数/秒；0 表示跳过")
@@ -131,7 +167,7 @@ func main() {
 		if *profilePath == "" {
 			log.Fatal("seed requires -profile")
 		}
-		if err := seed(context.Background(), cfg, *profilePath, *users, *codes); err != nil {
+		if err := seed(context.Background(), cfg, *profilePath, *users, *codes, *listings, *hotListings, *hotRequestPercent); err != nil {
 			log.Fatal(err)
 		}
 	case "run":
@@ -154,9 +190,12 @@ func main() {
 	}
 }
 
-func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, codeCount int) error {
-	if userCount <= 0 || codeCount <= 0 {
-		return errors.New("users and codes must be positive")
+func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, codeCount, listingCount, hotListingCount, hotRequestPercent int) error {
+	if userCount <= 0 || codeCount <= 0 || listingCount <= 0 || codeCount < listingCount {
+		return errors.New("users, codes, and listings must be positive; codes must cover every listing")
+	}
+	if (hotListingCount == 0) != (hotRequestPercent == 0) || hotListingCount < 0 || hotListingCount >= listingCount || hotRequestPercent < 0 || hotRequestPercent >= 100 {
+		return errors.New("hot listings and hot request percent must both be zero, or use 1..listings-1 and 1..99")
 	}
 	clients, err := platform.Open(cfg.MySQLDSN, cfg.RedisAddr, cfg.KafkaBroker)
 	if err != nil {
@@ -181,11 +220,15 @@ func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, 
 	}
 	now := time.Now().UTC()
 	seededUsers := make([]store.User, 0, userCount)
-	listing := store.LicenseListing{SourceType: "official", Title: "压测商品-" + runID, UnitPriceFen: 1, Status: "active"}
+	listings := make([]store.LicenseListing, 0, listingCount)
 
 	if err := clients.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&listing).Error; err != nil {
-			return err
+		for index := 0; index < listingCount; index++ {
+			listing := store.LicenseListing{SourceType: "official", Title: fmt.Sprintf("压测商品-%s-%02d", runID, index), UnitPriceFen: 1, Status: "active"}
+			if err := tx.Create(&listing).Error; err != nil {
+				return err
+			}
+			listings = append(listings, listing)
 		}
 		for index := 0; index < userCount; index++ {
 			userID, err := ids.NextID()
@@ -204,9 +247,17 @@ func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, 
 			seededUsers = append(seededUsers, user)
 		}
 
+		listingIDs := make([]uint64, 0, len(listings))
+		listingByID := make(map[uint64]store.LicenseListing, len(listings))
+		for _, listing := range listings {
+			listingIDs = append(listingIDs, listing.ID)
+			listingByID[listing.ID] = listing
+		}
+		distribution := profile{ListingIDs: listingIDs, HotListingCount: hotListingCount, HotRequestPercent: hotRequestPercent}
 		codes := make([]store.ActivationCode, 0, min(codeCount, 500))
 		for index := 0; index < codeCount; index++ {
 			fingerprint := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", runID, index)))
+			listing := listingByID[distribution.listingIDForRequest(index)]
 			codes = append(codes, store.ActivationCode{
 				ListingID: listing.ID, SecretCiphertext: []byte("loadtest-ciphertext"), SecretFingerprint: fingerprint[:],
 				EncryptionKeyVersion: "loadtest", Status: "available",
@@ -230,7 +281,11 @@ func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, 
 		Secret: cfg.AuthSecret, Issuer: cfg.AuthIssuer, Audience: cfg.AuthAudience,
 		AccessTokenTTL: cfg.AccessTokenTTL, RefreshTokenTTL: cfg.RefreshTokenTTL, EmailCodeTTL: cfg.EmailCodeTTL, SnowflakeNodeID: cfg.SnowflakeNodeID,
 	})
-	result := profile{Version: profileVersion, CreatedAt: now, ListingID: listing.ID, CodeCount: codeCount, Users: make([]profileUser, 0, len(seededUsers))}
+	listingIDs := make([]uint64, 0, len(listings))
+	for _, listing := range listings {
+		listingIDs = append(listingIDs, listing.ID)
+	}
+	result := profile{Version: profileVersion, CreatedAt: now, ListingID: listingIDs[0], ListingIDs: listingIDs, HotListingCount: hotListingCount, HotRequestPercent: hotRequestPercent, CodeCount: codeCount, Users: make([]profileUser, 0, len(seededUsers))}
 	for _, user := range seededUsers {
 		if user.Email == nil {
 			return errors.New("seeded user has no email")
@@ -244,7 +299,7 @@ func seed(ctx context.Context, cfg config.Config, outputPath string, userCount, 
 	if err := writeJSON(outputPath, result, 0o600); err != nil {
 		return fmt.Errorf("write sensitive load-test profile: %w", err)
 	}
-	log.Printf("load-test seed created listing=%d users=%d codes=%d profile=%s", listing.ID, userCount, codeCount, outputPath)
+	log.Printf("load-test seed created listings=%d hot_listings=%d hot_request_percent=%d users=%d codes=%d profile=%s", listingCount, hotListingCount, hotRequestPercent, userCount, codeCount, outputPath)
 	return nil
 }
 
@@ -298,6 +353,10 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 	var createdOrders []paymentWork
 
 	if options.orderRate > 0 {
+		serverAcceptedBefore, err := fetchCounter(ctx, options.metricsURL, `goblog_order_submit_total{result="accepted"}`)
+		if err != nil {
+			return fmt.Errorf("read starting order input metric: %w", err)
+		}
 		if err := primeOrderConsumer(ctx, client, baseURL, db, loaded, runID, options.drainTimeout); err != nil {
 			return err
 		}
@@ -319,6 +378,20 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 		observer.wait()
 		if err != nil {
 			return err
+		}
+		serverAcceptedAfter, err := fetchCounter(ctx, options.metricsURL, `goblog_order_submit_total{result="accepted"}`)
+		if err != nil {
+			return fmt.Errorf("read ending order input metric: %w", err)
+		}
+		if serverAcceptedBefore != nil && serverAcceptedAfter != nil {
+			phase.ClientResponses = phase.Received
+			phase.Received = int(*serverAcceptedAfter - *serverAcceptedBefore - 1) // Exclude the unmeasured warm-up request.
+			if phase.Received < 0 {
+				return errors.New("order input metric decreased during load test")
+			}
+			if phase.InputDuration > 0 {
+				phase.RequestQPS = float64(phase.Received) / phase.InputDuration.Seconds()
+			}
 		}
 		phase.Created, phase.Rejected = created, rejected
 		phase.TransactionTPS, phase.CreatedTPS = transactionTPS, createdTPS
@@ -377,7 +450,8 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 // ensures it does not affect the reported throughput, latency, or queue peak.
 func primeOrderConsumer(ctx context.Context, client *http.Client, baseURL string, db *gorm.DB, loaded profile, runID string, timeout time.Duration) error {
 	requestID := runID + "-warmup"
-	payload, _ := json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": loaded.ListingID, "quantity": 1}}})
+	listingIDs := loaded.listingIDs()
+	payload, _ := json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": listingIDs[0], "quantity": 1}}})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/order-requests", strings.NewReader(string(payload)))
 	if err != nil {
 		return fmt.Errorf("create consumer warm-up request: %w", err)
@@ -420,16 +494,21 @@ type acceptedOrderRequest struct {
 }
 
 func submitOrders(ctx context.Context, client *http.Client, baseURL string, loaded profile, runID string, rate int, duration time.Duration, maxInflight int) (phaseReport, []acceptedOrderRequest) {
-	payload, _ := json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": loaded.ListingID, "quantity": 1}}})
+	listingIDs := loaded.listingIDs()
+	payloads := make(map[uint64][]byte, len(listingIDs))
+	for _, listingID := range listingIDs {
+		payloads[listingID], _ = json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": listingID, "quantity": 1}}})
+	}
 	accumulator := newPhaseAccumulator()
 	accepted := make([]acceptedOrderRequest, 0, requestedCount(rate, duration))
 	var acceptedMu sync.Mutex
 	runAtRate(ctx, rate, duration, maxInflight, func(index int) {
 		user := loaded.Users[index%len(loaded.Users)]
+		listingID := loaded.listingIDForRequest(index)
 		requestID := fmt.Sprintf("%s-order-%08d", runID, index)
 		start := time.Now().UTC()
 		accumulator.markStarted(start)
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/order-requests", strings.NewReader(string(payload)))
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/order-requests", strings.NewReader(string(payloads[listingID])))
 		if err != nil {
 			accumulator.record("client_error", time.Since(start), false)
 			return
@@ -810,11 +889,12 @@ func (a *phaseAccumulator) report(rate int, duration time.Duration) phaseReport 
 		received = 0
 	}
 	result.Received = received
+	inputSpan := duration
+	if !a.firstStarted.IsZero() && !a.lastStarted.IsZero() && !a.lastStarted.Before(a.firstStarted) && rate > 0 {
+		inputSpan = a.lastStarted.Sub(a.firstStarted) + time.Second/time.Duration(rate)
+	}
+	result.InputDuration = inputSpan
 	if received > 0 {
-		inputSpan := duration
-		if !a.firstStarted.IsZero() && !a.lastStarted.IsZero() && !a.lastStarted.Before(a.firstStarted) && rate > 0 {
-			inputSpan = a.lastStarted.Sub(a.firstStarted) + time.Second/time.Duration(rate)
-		}
 		if inputSpan > 0 {
 			result.RequestQPS = float64(received) / inputSpan.Seconds()
 		}
@@ -860,6 +940,43 @@ func fetchHistogramP99(ctx context.Context, metricsURL, metricBase, operation st
 		return nil, fmt.Errorf("metrics endpoint returned HTTP %d", response.StatusCode)
 	}
 	return parseHistogramP99(response.Body, metricBase, operation), nil
+}
+
+// fetchCounter reads one exact Prometheus counter series. It is used to make
+// request QPS reflect requests accepted by the API, including a request whose
+// client connection timed out after the API had already accepted it.
+func fetchCounter(ctx context.Context, metricsURL, series string) (*float64, error) {
+	if strings.TrimSpace(metricsURL) == "" {
+		return nil, nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metricsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metrics endpoint returned HTTP %d", response.StatusCode)
+	}
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 || fields[0] != series {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse counter %s: %w", series, err)
+		}
+		return &value, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func parseHistogramP99(reader io.Reader, metricBase, operation string) *float64 {
@@ -957,6 +1074,11 @@ func readProfile(path string) (profile, error) {
 	}
 	if loaded.Version != profileVersion || loaded.ListingID == 0 || loaded.CodeCount <= 0 || len(loaded.Users) == 0 {
 		return loaded, errors.New("invalid load-test profile")
+	}
+	for _, listingID := range loaded.listingIDs() {
+		if listingID == 0 {
+			return loaded, errors.New("load-test profile contains an incomplete listing")
+		}
 	}
 	for _, user := range loaded.Users {
 		if user.UserID == 0 || user.AccessToken == "" {

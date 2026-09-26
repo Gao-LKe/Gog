@@ -384,7 +384,6 @@ func (r redisAdapter) Increment(ctx context.Context, key string, ttl time.Durati
 
 const (
 	orderWriterBatchTimeout = 5 * time.Millisecond
-	orderTopicPartitions    = 1
 	orderTopicReplication   = 1
 )
 
@@ -472,13 +471,16 @@ func (p *kafkaProducer) Close() error {
 // EnsureOrderTopic creates the order topic before the consumer joins its
 // group. Kafka readers that subscribe before a new topic has partitions can
 // receive an empty assignment and stay unable to process later messages.
-func EnsureOrderTopic(ctx context.Context, rawBrokers, topic string) error {
+func EnsureOrderTopic(ctx context.Context, rawBrokers, topic string, partitions int) error {
 	brokers := kafkaBrokers(rawBrokers)
 	if len(brokers) == 0 {
 		return errors.New("kafka broker is not configured")
 	}
 	if topic == "" {
 		return errors.New("kafka topic is not configured")
+	}
+	if partitions <= 0 {
+		return errors.New("kafka topic partitions must be positive")
 	}
 	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
 	if err != nil {
@@ -494,5 +496,23 @@ func EnsureOrderTopic(ctx context.Context, rawBrokers, topic string) error {
 		return err
 	}
 	defer controllerConn.Close()
-	return controllerConn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: orderTopicPartitions, ReplicationFactor: orderTopicReplication})
+	if err := controllerConn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: partitions, ReplicationFactor: orderTopicReplication}); err != nil {
+		return err
+	}
+	current, err := controllerConn.ReadPartitions(topic)
+	if err != nil {
+		return err
+	}
+	if len(current) >= partitions {
+		return nil
+	}
+	client := &kafka.Client{Addr: kafka.TCP(net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))}
+	response, err := client.CreatePartitions(ctx, &kafka.CreatePartitionsRequest{Topics: []kafka.TopicPartitionsConfig{{Name: topic, Count: int32(partitions)}}})
+	if err != nil {
+		return err
+	}
+	if topicErr := response.Errors[topic]; topicErr != nil {
+		return topicErr
+	}
+	return nil
 }

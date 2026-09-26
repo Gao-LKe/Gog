@@ -27,7 +27,7 @@ func main() {
 		log.Fatal(err)
 	}
 	topicCtx, cancelTopic := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := platform.EnsureOrderTopic(topicCtx, cfg.KafkaBroker, contracts.OrderCreationTopic); err != nil {
+	if err := platform.EnsureOrderTopic(topicCtx, cfg.KafkaBroker, contracts.OrderCreationTopic, cfg.OrderTopicPartitions); err != nil {
 		cancelTopic()
 		log.Fatal(err)
 	}
@@ -36,11 +36,19 @@ func main() {
 		log.Fatal(err)
 	}
 	a := app.New(cfg, clients.Dependencies)
-	go consumeOrders(context.Background(), a.OrderService, cfg.KafkaBroker)
+	startOrderConsumers(context.Background(), a.OrderService, cfg.KafkaBroker, cfg.OrderConsumerWorkers)
 	go expirePendingOrders(context.Background(), a.OrderService)
 	log.Printf("api listening on %s", a.Config.HTTPAddr)
 	if err := a.Run(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func startOrderConsumers(ctx context.Context, service interface {
+	Consume(context.Context, string) error
+}, brokers string, workers int) {
+	for worker := 0; worker < workers; worker++ {
+		go consumeOrders(ctx, service, brokers)
 	}
 }
 

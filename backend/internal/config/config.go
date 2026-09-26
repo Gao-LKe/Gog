@@ -36,6 +36,8 @@ type Config struct {
 	MySQLDSN                 string
 	RedisAddr                string
 	KafkaBroker              string
+	OrderConsumerWorkers     int
+	OrderTopicPartitions     int
 }
 
 func FromEnv() Config {
@@ -72,6 +74,8 @@ func FromEnv() Config {
 		MySQLDSN:                 valueOrDefault("MYSQL_DSN", "shop:shop_dev_password@tcp(localhost:3306)/shop_core?parseTime=true"),
 		RedisAddr:                valueOrDefault("REDIS_ADDR", "localhost:6379"),
 		KafkaBroker:              strings.TrimSpace(valueOrDefault("KAFKA_BROKERS", "localhost:9092")),
+		OrderConsumerWorkers:     positiveIntOrDefault("ORDER_CONSUMER_WORKERS", 8),
+		OrderTopicPartitions:     positiveIntOrDefault("ORDER_TOPIC_PARTITIONS", 8),
 	}
 }
 
@@ -93,6 +97,9 @@ func (c Config) Validate() error {
 	}
 	if c.RealtimeMaxConnections <= 0 || c.RealtimeFallbackCooldown <= 0 {
 		return errors.New("realtime connection limit and fallback cooldown must be positive")
+	}
+	if c.OrderConsumerWorkers <= 0 || c.OrderTopicPartitions <= 0 {
+		return errors.New("order consumer workers and topic partitions must be positive")
 	}
 	if c.Environment != "production" {
 		return nil

@@ -36,8 +36,8 @@ type KafkaPartitionLag struct {
 }
 
 // SampleKafkaLag reads Kafka without joining the group or modifying offsets.
-// The whole observation is limited to five seconds; missing topic or committed
-// group positions are reported as not_integrated instead of a healthy zero.
+// The whole observation is limited to five seconds; a missing topic or a group
+// with no committed position on any partition is reported as not_integrated.
 func SampleKafkaLag(ctx context.Context, brokers []string, topic, group string, overdueAfter time.Duration) (KafkaLagSnapshot, error) {
 	snapshot := KafkaLagSnapshot{ObservedAt: time.Now(), State: "unavailable", Overdue: -1}
 	if topic == "" || group == "" {
@@ -148,6 +148,9 @@ func SampleKafkaLag(ctx context.Context, brokers []string, topic, group string, 
 		}
 		part := KafkaPartitionLag{Partition: partition, Lag: lag}
 		if lag > 0 {
+			if start < 0 {
+				start = end.FirstOffset
+			}
 			fetched, err := client.Fetch(ctx, &kafka.FetchRequest{
 				Topic: topic, Partition: partition, Offset: start,
 				MinBytes: 1, MaxBytes: 64 << 10, MaxWait: 250 * time.Millisecond,
@@ -175,7 +178,13 @@ func SampleKafkaLag(ctx context.Context, brokers []string, topic, group string, 
 
 func partitionLag(committed, first, last int64) (int64, error) {
 	if committed < 0 {
-		return 0, errors.New("partition has no committed offset")
+		if first < 0 || last < first {
+			return 0, errors.New("invalid log offset range")
+		}
+		// A consumer group can have started on other partitions while this
+		// partition has never received a record. Treat that empty partition as
+		// zero lag; if it has records, all of them are waiting to be consumed.
+		return last - first, nil
 	}
 	if first < 0 || last < first {
 		return 0, errors.New("invalid log offset range")

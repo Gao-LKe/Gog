@@ -42,3 +42,27 @@ func TestHTTPMiddlewareCountsStatusAndRouteTemplate(t *testing.T) {
 		t.Error("metrics exposed an identifier or health probe")
 	}
 }
+
+func TestConsumerAliveKeepsServiceUpUntilLastWorkerStops(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.ConsumerAlive(true)
+	metrics.ConsumerAlive(true)
+	metrics.ConsumerAlive(false)
+	response := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, expected := range []string{
+		`goblog_order_consumer_alive 1`,
+		`goblog_order_consumer_workers 1`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("missing metric %q", expected)
+		}
+	}
+	metrics.ConsumerAlive(false)
+	response = httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `goblog_order_consumer_alive 0`) {
+		t.Error("consumer should be unavailable after the last worker stops")
+	}
+}

@@ -70,6 +70,8 @@ services:
       MYSQL_DSN: shop:${MYSQL_PASSWORD:-shop_dev_password}@tcp(mysql:3306)/shop_core?parseTime=true
       REDIS_ADDR: redis:6379
       KAFKA_BROKERS: kafka:9092
+      ORDER_CONSUMER_WORKERS: ${ORDER_CONSUMER_WORKERS:-8}
+      ORDER_TOPIC_PARTITIONS: ${ORDER_TOPIC_PARTITIONS:-8}
     ports:
       - "8081:8080"
     expose:

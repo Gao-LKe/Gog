@@ -47,3 +47,45 @@ goblog_db_transaction_duration_seconds_bucket{operation="payment_create",result=
 		t.Fatalf("p99 = %v, want 10 ms", value)
 	}
 }
+
+func TestListingIDForRequestSpreadsHotTraffic(t *testing.T) {
+	loaded := profile{
+		ListingIDs:        []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		HotListingCount:   5,
+		HotRequestPercent: 30,
+	}
+	hot, ordinary := 0, 0
+	for index := 0; index < 100; index++ {
+		listingID := loaded.listingIDForRequest(index)
+		if listingID <= 5 {
+			hot++
+		} else {
+			ordinary++
+		}
+	}
+	if hot != 30 || ordinary != 70 {
+		t.Fatalf("hot/ordinary = %d/%d, want 30/70", hot, ordinary)
+	}
+	for start := 0; start < 100; start += 10 {
+		count := 0
+		for index := start; index < start+10; index++ {
+			if loaded.listingIDForRequest(index) <= 5 {
+				count++
+			}
+		}
+		if count != 3 {
+			t.Fatalf("requests %d-%d contain %d hot requests, want 3", start, start+9, count)
+		}
+	}
+}
+
+func TestPhaseReportKeepsActualInputDuration(t *testing.T) {
+	accumulator := newPhaseAccumulator()
+	accumulator.markStarted(time.Unix(100, 0))
+	accumulator.markStarted(time.Unix(101, 0))
+	accumulator.record("transport_error", time.Millisecond, false)
+	result := accumulator.report(100, 10*time.Second)
+	if result.InputDuration <= 0 {
+		t.Fatal("input duration was not recorded")
+	}
+}

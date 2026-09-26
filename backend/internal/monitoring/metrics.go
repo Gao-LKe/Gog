@@ -18,35 +18,37 @@ import (
 //===========================================
 
 type Metrics struct {
-	registry       *prometheus.Registry
-	httpReceived   prometheus.Counter
-	httpCompleted  *prometheus.CounterVec
-	httpDuration   *prometheus.HistogramVec
-	httpInflight   prometheus.Gauge
-	orderSubmit    *prometheus.CounterVec
-	submitDuration *prometheus.HistogramVec
-	orderProcess   *prometheus.CounterVec
-	processTime    *prometheus.HistogramVec
-	consumer       *prometheus.CounterVec
-	consumerAlive  prometheus.Gauge
-	dbTransaction  *prometheus.HistogramVec
-	kafkaLag       *prometheus.GaugeVec
-	kafkaOldest    *prometheus.GaugeVec
-	kafkaProbe     prometheus.Gauge
-	kafkaSampleAt  prometheus.Gauge
-	dbOpen         prometheus.Gauge
-	dbInUse        prometheus.Gauge
-	dbWaitCount    prometheus.Gauge
-	dbWaitSeconds  prometheus.Gauge
-	dbSampleAt     prometheus.Gauge
-	dbProbe        prometheus.Gauge
-	mu             sync.RWMutex
-	latestKafka    KafkaLagSnapshot
-	hasKafka       bool
-	latestDB       sql.DBStats
-	dbSampledAt    time.Time
-	hasDB          bool
-	dbHealthy      bool
+	registry        *prometheus.Registry
+	httpReceived    prometheus.Counter
+	httpCompleted   *prometheus.CounterVec
+	httpDuration    *prometheus.HistogramVec
+	httpInflight    prometheus.Gauge
+	orderSubmit     *prometheus.CounterVec
+	submitDuration  *prometheus.HistogramVec
+	orderProcess    *prometheus.CounterVec
+	processTime     *prometheus.HistogramVec
+	consumer        *prometheus.CounterVec
+	consumerAlive   prometheus.Gauge
+	consumerWorkers prometheus.Gauge
+	dbTransaction   *prometheus.HistogramVec
+	kafkaLag        *prometheus.GaugeVec
+	kafkaOldest     *prometheus.GaugeVec
+	kafkaProbe      prometheus.Gauge
+	kafkaSampleAt   prometheus.Gauge
+	dbOpen          prometheus.Gauge
+	dbInUse         prometheus.Gauge
+	dbWaitCount     prometheus.Gauge
+	dbWaitSeconds   prometheus.Gauge
+	dbSampleAt      prometheus.Gauge
+	dbProbe         prometheus.Gauge
+	mu              sync.RWMutex
+	latestKafka     KafkaLagSnapshot
+	hasKafka        bool
+	latestDB        sql.DBStats
+	dbSampledAt     time.Time
+	hasDB           bool
+	dbHealthy       bool
+	activeConsumers int
 }
 
 func NewMetrics() *Metrics {
@@ -86,6 +88,9 @@ func NewMetrics() *Metrics {
 		consumerAlive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "goblog", Subsystem: "order", Name: "consumer_alive", Help: "Whether the order consumer loop is running.",
 		}),
+		consumerWorkers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "goblog", Subsystem: "order", Name: "consumer_workers", Help: "Order consumer worker loops currently running.",
+		}),
 		dbTransaction: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "goblog", Name: "db_transaction_duration_seconds", Help: "Database transaction duration by business operation.",
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
@@ -122,7 +127,7 @@ func NewMetrics() *Metrics {
 		}),
 	}
 	registry.MustRegister(m.httpReceived, m.httpCompleted, m.httpDuration, m.httpInflight,
-		m.orderSubmit, m.submitDuration, m.orderProcess, m.processTime, m.consumer, m.consumerAlive, m.dbTransaction,
+		m.orderSubmit, m.submitDuration, m.orderProcess, m.processTime, m.consumer, m.consumerAlive, m.consumerWorkers, m.dbTransaction,
 		m.kafkaLag, m.kafkaOldest, m.kafkaProbe, m.kafkaSampleAt,
 		m.dbOpen, m.dbInUse, m.dbWaitCount, m.dbWaitSeconds, m.dbSampleAt, m.dbProbe)
 	registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -197,7 +202,16 @@ func (m *Metrics) DBTransaction(operation, result string, duration time.Duration
 
 func (m *Metrics) OrderConsumer(result string) { m.consumer.WithLabelValues(result).Inc() }
 func (m *Metrics) ConsumerAlive(alive bool) {
+	m.mu.Lock()
 	if alive {
+		m.activeConsumers++
+	} else if m.activeConsumers > 0 {
+		m.activeConsumers--
+	}
+	active := m.activeConsumers
+	m.mu.Unlock()
+	m.consumerWorkers.Set(float64(active))
+	if active > 0 {
 		m.consumerAlive.Set(1)
 	} else {
 		m.consumerAlive.Set(0)

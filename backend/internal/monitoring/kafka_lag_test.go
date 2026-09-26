@@ -18,7 +18,8 @@ func TestPartitionLag(t *testing.T) {
 	}{
 		{"empty", 10, 10, 10, 0, false},
 		{"backlog", 12, 10, 25, 13, false},
-		{"uncommitted", -1, 0, 10, 0, true},
+		{"uncommitted backlog", -1, 0, 10, 10, false},
+		{"uncommitted empty", -1, 10, 10, 0, false},
 		{"retention gap", 2, 4, 10, 0, true},
 		{"future commit", 12, 0, 10, 0, true},
 		{"bad log range", 0, -1, 10, 0, true},
