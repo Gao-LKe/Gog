@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,5 +31,19 @@ func TestNormalizeBaseURL(t *testing.T) {
 	}
 	if _, err := normalizeBaseURL("localhost:8081"); err == nil {
 		t.Fatal("relative URL was accepted")
+	}
+}
+
+func TestParseHistogramP99FiltersOperation(t *testing.T) {
+	metrics := `# TYPE goblog_db_transaction_duration_seconds histogram
+goblog_db_transaction_duration_seconds_bucket{operation="order_create",result="success",le="0.005"} 90
+goblog_db_transaction_duration_seconds_bucket{operation="order_create",result="success",le="0.01"} 99
+goblog_db_transaction_duration_seconds_bucket{operation="order_create",result="success",le="0.025"} 100
+goblog_db_transaction_duration_seconds_bucket{operation="order_create",result="success",le="+Inf"} 100
+goblog_db_transaction_duration_seconds_bucket{operation="payment_create",result="success",le="0.005"} 100
+`
+	value := parseHistogramP99(strings.NewReader(metrics), "goblog_db_transaction_duration_seconds", "order_create")
+	if value == nil || *value != 10 {
+		t.Fatalf("p99 = %v, want 10 ms", value)
 	}
 }

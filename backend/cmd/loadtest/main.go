@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -67,20 +68,30 @@ type runReport struct {
 }
 
 type phaseReport struct {
-	Rate            int            `json:"target_rate_per_second"`
-	Duration        time.Duration  `json:"target_duration"`
-	Launched        int            `json:"launched"`
-	Succeeded       int            `json:"succeeded"`
-	Responses       map[string]int `json:"responses"`
-	SuccessQPS      float64        `json:"success_qps"`
-	P50MS           *float64       `json:"p50_ms,omitempty"`
-	P95MS           *float64       `json:"p95_ms,omitempty"`
-	P99MS           *float64       `json:"p99_ms,omitempty"`
-	LastSuccessAt   *time.Time     `json:"last_success_at,omitempty"`
-	Created         int            `json:"created,omitempty"`
-	Rejected        int            `json:"rejected,omitempty"`
-	PeakQueueLag    *int64         `json:"peak_queue_lag,omitempty"`
-	DrainAfterInput *time.Duration `json:"drain_after_last_success,omitempty"`
+	Rate                    int            `json:"target_rate_per_second"`
+	Duration                time.Duration  `json:"target_duration"`
+	Launched                int            `json:"launched"`
+	Received                int            `json:"received"`
+	Succeeded               int            `json:"succeeded"`
+	Responses               map[string]int `json:"responses"`
+	RequestQPS              float64        `json:"request_qps"`
+	TransactionTPS          float64        `json:"transaction_tps,omitempty"`
+	CreatedTPS              float64        `json:"created_tps,omitempty"`
+	P50MS                   *float64       `json:"http_p50_ms,omitempty"`
+	P95MS                   *float64       `json:"http_p95_ms,omitempty"`
+	P99MS                   *float64       `json:"http_p99_ms,omitempty"`
+	E2EP50MS                *float64       `json:"e2e_created_p50_ms,omitempty"`
+	E2EP95MS                *float64       `json:"e2e_created_p95_ms,omitempty"`
+	E2EP99MS                *float64       `json:"e2e_created_p99_ms,omitempty"`
+	DBTransactionP99MS      *float64       `json:"db_transaction_p99_ms,omitempty"`
+	LastSuccessAt           *time.Time     `json:"last_success_at,omitempty"`
+	Created                 int            `json:"created,omitempty"`
+	Rejected                int            `json:"rejected,omitempty"`
+	BusinessSuccessRate     float64        `json:"business_success_rate,omitempty"`
+	PeakQueueLag            *int64         `json:"peak_queue_lag,omitempty"`
+	QueueLagAtInputEnd      *int64         `json:"queue_lag_at_input_end,omitempty"`
+	QueueGrowingDuringInput bool           `json:"queue_growing_during_input,omitempty"`
+	DrainAfterInput         *time.Duration `json:"drain_after_last_success,omitempty"`
 }
 
 type phaseAccumulator struct {
@@ -90,6 +101,8 @@ type phaseAccumulator struct {
 	responses     map[string]int
 	latencies     []time.Duration
 	lastSucceeded time.Time
+	firstStarted  time.Time
+	lastStarted   time.Time
 }
 
 func main() {
@@ -97,6 +110,7 @@ func main() {
 	profilePath := flag.String("profile", "", "压测资料文件路径")
 	resultPath := flag.String("result", "", "压测结果 JSON 路径")
 	baseURL := flag.String("base-url", "http://localhost:8081/api", "API 基地址")
+	metricsURL := flag.String("metrics-url", "", "应用指标地址，例如 http://localhost:9091/metrics")
 	users := flag.Int("users", 100, "seed 时创建的测试用户数")
 	codes := flag.Int("codes", 10000, "seed 时创建的可售激活码数")
 	orderRate := flag.Int("order-rate", 0, "下单目标请求数/秒；0 表示跳过")
@@ -126,7 +140,8 @@ func main() {
 		}
 		options := runOptions{
 			profilePath: *profilePath, resultPath: *resultPath, baseURL: *baseURL,
-			orderRate: *orderRate, orderDuration: *orderDuration,
+			metricsURL: *metricsURL,
+			orderRate:  *orderRate, orderDuration: *orderDuration,
 			paymentRate: *paymentRate, paymentDuration: *paymentDuration,
 			maxInflight: *maxInflight, drainTimeout: *drainTimeout,
 		}
@@ -237,6 +252,7 @@ type runOptions struct {
 	profilePath                    string
 	resultPath                     string
 	baseURL                        string
+	metricsURL                     string
 	orderRate, paymentRate         int
 	orderDuration, paymentDuration time.Duration
 	maxInflight                    int
@@ -293,17 +309,33 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 			observer.wait()
 			return err
 		}
+		observer.markInputStart()
 
 		phase, accepted := submitOrders(ctx, client, baseURL, loaded, runID, options.orderRate, options.orderDuration, options.maxInflight)
-		created, rejected, drain, err := waitForOrderDrain(ctx, db, observer, runID, accepted, phase.LastSuccessAt, options.drainTimeout)
+		observer.sample(ctx)
+		lagAtInputEnd := observer.latestLagValue()
+		created, rejected, drain, e2e, transactionTPS, createdTPS, err := waitForOrderDrain(ctx, db, observer, runID, accepted, phase.LastSuccessAt, options.drainTimeout)
 		stopObserver()
 		observer.wait()
 		if err != nil {
 			return err
 		}
 		phase.Created, phase.Rejected = created, rejected
+		phase.TransactionTPS, phase.CreatedTPS = transactionTPS, createdTPS
+		phase.E2EP50MS = percentileMillis(e2e, 0.50)
+		phase.E2EP95MS = percentileMillis(e2e, 0.95)
+		phase.E2EP99MS = percentileMillis(e2e, 0.99)
+		if phase.Launched > 0 {
+			phase.BusinessSuccessRate = float64(created) / float64(phase.Launched)
+		}
 		phase.DrainAfterInput = drain
 		phase.PeakQueueLag = observer.maxLagValue()
+		phase.QueueLagAtInputEnd = lagAtInputEnd
+		phase.QueueGrowingDuringInput = observer.queueGrowingDuringInput(lagAtInputEnd)
+		phase.DBTransactionP99MS, err = fetchHistogramP99(ctx, options.metricsURL, "goblog_db_transaction_duration_seconds", "order_create")
+		if err != nil {
+			return fmt.Errorf("read order database transaction metric: %w", err)
+		}
 		report.Order = &phase
 		createdOrders, err = findCreatedOrders(ctx, db, runID, loaded)
 		if err != nil {
@@ -323,6 +355,10 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 			return fmt.Errorf("payment run needs %d pending orders but only %d were created", wanted, len(createdOrders))
 		}
 		phase := submitPayments(ctx, client, baseURL, createdOrders[:wanted], runID, options.paymentRate, options.paymentDuration, options.maxInflight)
+		phase.DBTransactionP99MS, err = fetchHistogramP99(ctx, options.metricsURL, "goblog_db_transaction_duration_seconds", "payment_create")
+		if err != nil {
+			return fmt.Errorf("read payment database transaction metric: %w", err)
+		}
 		report.Payment = &phase
 	}
 
@@ -378,13 +414,21 @@ func primeOrderConsumer(ctx context.Context, client *http.Client, baseURL string
 	return errors.New("consumer warm-up did not reach a terminal order status")
 }
 
-func submitOrders(ctx context.Context, client *http.Client, baseURL string, loaded profile, runID string, rate int, duration time.Duration, maxInflight int) (phaseReport, int) {
+type acceptedOrderRequest struct {
+	requestID string
+	startedAt time.Time
+}
+
+func submitOrders(ctx context.Context, client *http.Client, baseURL string, loaded profile, runID string, rate int, duration time.Duration, maxInflight int) (phaseReport, []acceptedOrderRequest) {
 	payload, _ := json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": loaded.ListingID, "quantity": 1}}})
 	accumulator := newPhaseAccumulator()
+	accepted := make([]acceptedOrderRequest, 0, requestedCount(rate, duration))
+	var acceptedMu sync.Mutex
 	runAtRate(ctx, rate, duration, maxInflight, func(index int) {
 		user := loaded.Users[index%len(loaded.Users)]
 		requestID := fmt.Sprintf("%s-order-%08d", runID, index)
-		start := time.Now()
+		start := time.Now().UTC()
+		accumulator.markStarted(start)
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/order-requests", strings.NewReader(string(payload)))
 		if err != nil {
 			accumulator.record("client_error", time.Since(start), false)
@@ -400,10 +444,15 @@ func submitOrders(ctx context.Context, client *http.Client, baseURL string, load
 		}
 		_, _ = io.Copy(io.Discard, response.Body)
 		_ = response.Body.Close()
+		if response.StatusCode == http.StatusAccepted {
+			acceptedMu.Lock()
+			accepted = append(accepted, acceptedOrderRequest{requestID: requestID, startedAt: start})
+			acceptedMu.Unlock()
+		}
 		accumulator.record("http_"+strconv.Itoa(response.StatusCode), time.Since(start), response.StatusCode == http.StatusAccepted)
 	})
 	result := accumulator.report(rate, duration)
-	return result, result.Succeeded
+	return result, accepted
 }
 
 type paymentWork struct {
@@ -416,7 +465,8 @@ func submitPayments(ctx context.Context, client *http.Client, baseURL string, or
 	runAtRate(ctx, rate, duration, maxInflight, func(index int) {
 		work := orders[index]
 		body, _ := json.Marshal(map[string]string{"order_no": work.orderNo})
-		start := time.Now()
+		start := time.Now().UTC()
+		accumulator.markStarted(start)
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/payments", strings.NewReader(string(body)))
 		if err != nil {
 			accumulator.record("client_error", time.Since(start), false)
@@ -473,33 +523,92 @@ func runAtRate(ctx context.Context, rate int, duration time.Duration, maxInfligh
 	workers.Wait()
 }
 
-func waitForOrderDrain(ctx context.Context, db *gorm.DB, observer *lagObserver, runID string, accepted int, lastSuccess *time.Time, timeout time.Duration) (int, int, *time.Duration, error) {
-	if accepted == 0 {
-		return 0, 0, nil, errors.New("no order request was accepted")
+func waitForOrderDrain(ctx context.Context, db *gorm.DB, observer *lagObserver, runID string, accepted []acceptedOrderRequest, lastSuccess *time.Time, timeout time.Duration) (int, int, *time.Duration, []time.Duration, float64, float64, error) {
+	if len(accepted) == 0 {
+		return 0, 0, nil, nil, 0, 0, errors.New("no order request was accepted")
 	}
 	deadline := time.Now().Add(timeout)
 	for {
 		created, rejected, err := terminalOrderCounts(ctx, db, runID)
 		if err != nil {
-			return 0, 0, nil, err
+			return 0, 0, nil, nil, 0, 0, err
 		}
-		if created+rejected >= accepted && observer.isDrained() {
+		if created+rejected >= len(accepted) && observer.isDrained() {
 			var drain *time.Duration
 			if lastSuccess != nil {
 				elapsed := time.Since(*lastSuccess)
 				drain = &elapsed
 			}
-			return created, rejected, drain, nil
+			e2e, transactionTPS, createdTPS, err := orderCompletionMetrics(ctx, db, runID, accepted)
+			if err != nil {
+				return 0, 0, nil, nil, 0, 0, err
+			}
+			return created, rejected, drain, e2e, transactionTPS, createdTPS, nil
 		}
 		if time.Now().After(deadline) {
-			return 0, 0, nil, fmt.Errorf("order queue did not drain within %s: terminal=%d accepted=%d", timeout, created+rejected, accepted)
+			return 0, 0, nil, nil, 0, 0, fmt.Errorf("order queue did not drain within %s: terminal=%d accepted=%d", timeout, created+rejected, len(accepted))
 		}
 		select {
 		case <-ctx.Done():
-			return 0, 0, nil, ctx.Err()
+			return 0, 0, nil, nil, 0, 0, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+type orderCompletionRow struct {
+	RequestID string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func orderCompletionMetrics(ctx context.Context, db *gorm.DB, runID string, accepted []acceptedOrderRequest) ([]time.Duration, float64, float64, error) {
+	var rows []orderCompletionRow
+	if err := db.WithContext(ctx).Model(&store.OrderCreationRequest{}).
+		Select("request_id, status, created_at, updated_at").
+		Where("request_id LIKE ? AND status IN ?", runID+"-order-%", []string{"created", "rejected"}).
+		Find(&rows).Error; err != nil {
+		return nil, 0, 0, err
+	}
+	starts := make(map[string]time.Time, len(accepted))
+	var firstStart time.Time
+	for _, request := range accepted {
+		starts[request.requestID] = request.startedAt
+		if firstStart.IsZero() || request.startedAt.Before(firstStart) {
+			firstStart = request.startedAt
+		}
+	}
+	createdLatencies := make([]time.Duration, 0, len(rows))
+	var lastTerminal time.Time
+	created := 0
+	for _, row := range rows {
+		startedAt, ok := starts[row.RequestID]
+		if !ok {
+			continue
+		}
+		terminalAt := row.UpdatedAt
+		if terminalAt.After(lastTerminal) {
+			lastTerminal = terminalAt
+		}
+		if row.Status == "created" {
+			created++
+			createdAt := row.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = row.UpdatedAt
+			}
+			if createdAt.After(startedAt) {
+				createdLatencies = append(createdLatencies, createdAt.Sub(startedAt))
+			}
+		}
+	}
+	if firstStart.IsZero() || lastTerminal.IsZero() || !lastTerminal.After(firstStart) {
+		return createdLatencies, 0, 0, nil
+	}
+	span := lastTerminal.Sub(firstStart).Seconds()
+	terminalTPS := float64(len(rows)) / span
+	createdTPS := float64(created) / span
+	return createdLatencies, terminalTPS, createdTPS, nil
 }
 
 func waitForEmptyQueue(ctx context.Context, observer *lagObserver, timeout time.Duration) error {
@@ -572,11 +681,12 @@ func findCreatedOrders(ctx context.Context, db *gorm.DB, runID string, loaded pr
 }
 
 type lagObserver struct {
-	cfg       config.Config
-	mu        sync.Mutex
-	maxLag    *int64
-	latestLag *int64
-	done      chan struct{}
+	cfg        config.Config
+	mu         sync.Mutex
+	maxLag     *int64
+	latestLag  *int64
+	inputStart *int64
+	done       chan struct{}
 }
 
 func newLagObserver(cfg config.Config) *lagObserver {
@@ -630,6 +740,32 @@ func (o *lagObserver) maxLagValue() *int64 {
 	return &value
 }
 
+func (o *lagObserver) latestLagValue() *int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.latestLag == nil {
+		return nil
+	}
+	value := *o.latestLag
+	return &value
+}
+
+func (o *lagObserver) markInputStart() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.latestLag == nil {
+		return
+	}
+	value := *o.latestLag
+	o.inputStart = &value
+}
+
+func (o *lagObserver) queueGrowingDuringInput(inputEnd *int64) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.inputStart != nil && inputEnd != nil && *inputEnd > *o.inputStart
+}
+
 func (o *lagObserver) isDrained() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -654,12 +790,34 @@ func (a *phaseAccumulator) record(response string, duration time.Duration, succe
 	a.lastSucceeded = now
 }
 
+func (a *phaseAccumulator) markStarted(startedAt time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.firstStarted.IsZero() || startedAt.Before(a.firstStarted) {
+		a.firstStarted = startedAt
+	}
+	if a.lastStarted.IsZero() || startedAt.After(a.lastStarted) {
+		a.lastStarted = startedAt
+	}
+}
+
 func (a *phaseAccumulator) report(rate int, duration time.Duration) phaseReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	result := phaseReport{Rate: rate, Duration: duration, Launched: a.launched, Succeeded: a.succeeded, Responses: a.responses}
-	if duration > 0 {
-		result.SuccessQPS = float64(a.succeeded) / duration.Seconds()
+	received := a.launched - a.responses["client_error"] - a.responses["transport_error"]
+	if received < 0 {
+		received = 0
+	}
+	result.Received = received
+	if received > 0 {
+		inputSpan := duration
+		if !a.firstStarted.IsZero() && !a.lastStarted.IsZero() && !a.lastStarted.Before(a.firstStarted) && rate > 0 {
+			inputSpan = a.lastStarted.Sub(a.firstStarted) + time.Second/time.Duration(rate)
+		}
+		if inputSpan > 0 {
+			result.RequestQPS = float64(received) / inputSpan.Seconds()
+		}
 	}
 	if !a.lastSucceeded.IsZero() {
 		value := a.lastSucceeded
@@ -683,6 +841,87 @@ func percentileMillis(values []time.Duration, quantile float64) *float64 {
 	}
 	value := float64(ordered[index]) / float64(time.Millisecond)
 	return &value
+}
+
+func fetchHistogramP99(ctx context.Context, metricsURL, metricBase, operation string) (*float64, error) {
+	if strings.TrimSpace(metricsURL) == "" {
+		return nil, nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metricsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metrics endpoint returned HTTP %d", response.StatusCode)
+	}
+	return parseHistogramP99(response.Body, metricBase, operation), nil
+}
+
+func parseHistogramP99(reader io.Reader, metricBase, operation string) *float64 {
+	type bucket struct {
+		upper float64
+		count float64
+	}
+	buckets := make([]bucket, 0, 16)
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		prefix := metricBase + "_bucket"
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		labelsEnd := strings.Index(line, "}")
+		if labelsEnd < 0 {
+			continue
+		}
+		labels := line[strings.Index(line, "{")+1 : labelsEnd]
+		if operation != "" && !strings.Contains(labels, `operation="`+operation+`"`) {
+			continue
+		}
+		leStart := strings.Index(labels, `le="`)
+		if leStart < 0 {
+			continue
+		}
+		leStart += len(`le="`)
+		leEnd := strings.Index(labels[leStart:], `"`)
+		if leEnd < 0 {
+			continue
+		}
+		upper, err := strconv.ParseFloat(labels[leStart:leStart+leEnd], 64)
+		if err != nil || math.IsInf(upper, 1) {
+			continue
+		}
+		count, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		buckets = append(buckets, bucket{upper: upper, count: count})
+	}
+	if len(buckets) == 0 {
+		return nil
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].upper < buckets[j].upper })
+	total := buckets[len(buckets)-1].count
+	if total <= 0 {
+		return nil
+	}
+	target := total * 0.99
+	for _, item := range buckets {
+		if item.count >= target {
+			value := item.upper * 1000
+			return &value
+		}
+	}
+	return nil
 }
 
 func requestedCount(rate int, duration time.Duration) int {

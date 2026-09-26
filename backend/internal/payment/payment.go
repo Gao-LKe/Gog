@@ -37,11 +37,20 @@ type BalanceView struct {
 	AvailableFen uint64 `json:"available_fen"`
 }
 
-type Service struct{ db *gorm.DB }
+type Service struct {
+	db       *gorm.DB
+	observer any
+}
 
 // The optional argument keeps the previous constructor call site source-compatible
 // while the external-channel adapter is intentionally disabled for balance payment.
-func NewService(db *gorm.DB, _ ...any) *Service { return &Service{db: db} }
+func NewService(db *gorm.DB, observers ...any) *Service {
+	service := &Service{db: db}
+	if len(observers) > 0 {
+		service.observer = observers[0]
+	}
+	return service
+}
 
 // Create confirms an already-reserved order with the buyer's stored balance.
 // Balance, payment record and reserved activation-code ownership share one transaction.
@@ -51,6 +60,7 @@ func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey str
 	}
 
 	var attempt store.PaymentAttempt
+	transactionStarted := time.Now()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var order store.Order
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("order_no = ? AND buyer_user_id = ?", strings.TrimSpace(req.OrderNo), buyerID).First(&order).Error; err != nil {
@@ -136,6 +146,15 @@ func (s *Service) Create(ctx context.Context, buyerID uint64, idempotencyKey str
 		}
 		return tx.Model(&store.OrderItem{}).Where("order_id = ? AND status = ?", order.ID, "pending_payment").Update("status", "paid").Error
 	})
+	if observer, ok := s.observer.(interface {
+		DBTransaction(operation, result string, duration time.Duration)
+	}); ok {
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		observer.DBTransaction("payment_create", result, time.Since(transactionStarted))
+	}
 	if err != nil {
 		return CreateResult{}, err
 	}

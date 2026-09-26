@@ -73,6 +73,10 @@ type Observer interface {
 	ConsumerAlive(alive bool)
 }
 
+type dbTransactionObserver interface {
+	DBTransaction(operation, result string, duration time.Duration)
+}
+
 type inventoryCache interface {
 	Set(context.Context, string, any, time.Duration) error
 	Get(context.Context, string) (string, error)
@@ -186,6 +190,7 @@ func (s *Service) Process(ctx context.Context, event contracts.OrderCreationRequ
 func (s *Service) createOrder(ctx context.Context, event contracts.OrderCreationRequestedEvent, items []Item) (bool, error) {
 	reservedByListing := make(map[uint64]uint64, len(items))
 	created := false
+	transactionStarted := time.Now()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing store.OrderCreationRequest
 		if err := tx.Where("request_id = ?", event.RequestID).First(&existing).Error; err == nil {
@@ -260,6 +265,13 @@ func (s *Service) createOrder(ctx context.Context, event contracts.OrderCreation
 		created = true
 		return nil
 	})
+	if observer, ok := s.observer.(dbTransactionObserver); ok {
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		observer.DBTransaction("order_create", result, time.Since(transactionStarted))
+	}
 	if err != nil {
 		return false, err
 	}

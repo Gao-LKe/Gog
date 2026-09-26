@@ -29,6 +29,7 @@ type Metrics struct {
 	processTime    *prometheus.HistogramVec
 	consumer       *prometheus.CounterVec
 	consumerAlive  prometheus.Gauge
+	dbTransaction  *prometheus.HistogramVec
 	kafkaLag       *prometheus.GaugeVec
 	kafkaOldest    *prometheus.GaugeVec
 	kafkaProbe     prometheus.Gauge
@@ -85,6 +86,10 @@ func NewMetrics() *Metrics {
 		consumerAlive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "goblog", Subsystem: "order", Name: "consumer_alive", Help: "Whether the order consumer loop is running.",
 		}),
+		dbTransaction: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "goblog", Name: "db_transaction_duration_seconds", Help: "Database transaction duration by business operation.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+		}, []string{"operation", "result"}),
 		kafkaLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "goblog", Subsystem: "order", Name: "kafka_lag", Help: "Uncommitted order commands by partition.",
 		}, []string{"partition"}),
@@ -117,7 +122,7 @@ func NewMetrics() *Metrics {
 		}),
 	}
 	registry.MustRegister(m.httpReceived, m.httpCompleted, m.httpDuration, m.httpInflight,
-		m.orderSubmit, m.submitDuration, m.orderProcess, m.processTime, m.consumer, m.consumerAlive,
+		m.orderSubmit, m.submitDuration, m.orderProcess, m.processTime, m.consumer, m.consumerAlive, m.dbTransaction,
 		m.kafkaLag, m.kafkaOldest, m.kafkaProbe, m.kafkaSampleAt,
 		m.dbOpen, m.dbInUse, m.dbWaitCount, m.dbWaitSeconds, m.dbSampleAt, m.dbProbe)
 	registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -184,6 +189,10 @@ func (m *Metrics) OrderSubmitted(result string, duration time.Duration) {
 func (m *Metrics) OrderProcessed(result string, duration time.Duration) {
 	m.orderProcess.WithLabelValues(result).Inc()
 	m.processTime.WithLabelValues(result).Observe(duration.Seconds())
+}
+
+func (m *Metrics) DBTransaction(operation, result string, duration time.Duration) {
+	m.dbTransaction.WithLabelValues(operation, result).Observe(duration.Seconds())
 }
 
 func (m *Metrics) OrderConsumer(result string) { m.consumer.WithLabelValues(result).Inc() }

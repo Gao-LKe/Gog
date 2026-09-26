@@ -50,7 +50,7 @@ func New(cfg config.Config, deps platform.Dependencies) *App {
 	auth.RegisterRoutes(api.Group("/auth"), authService)
 	orderService := order.NewService(deps.Gorm, deps.Redis, deps.Kafka, metrics)
 	order.RegisterRoutes(api, orderService)
-	payment.RegisterRoutes(api, payment.NewService(deps.Gorm))
+	payment.RegisterRoutes(api, payment.NewService(deps.Gorm, metrics))
 	realtime.RegisterRoutes(api, realtime.NewHub(deps.Gorm, realtime.Options{MaxConnections: cfg.RealtimeMaxConnections, FallbackCooldown: cfg.RealtimeFallbackCooldown}))
 	monitor := api.Group("/monitoring")
 	monitor.Use(auth.RequireEndpoint(auth.DefaultEndpointAuthorizer(), auth.EndpointRule{Role: auth.RoleAdmin, Permission: auth.PermissionManageSystem}))
