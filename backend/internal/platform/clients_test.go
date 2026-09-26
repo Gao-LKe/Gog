@@ -129,6 +129,37 @@ func TestRedisAtomicRefreshRotationConcurrentReplay(t *testing.T) {
 	}
 }
 
+func TestKafkaProducerReusesWriterForSameTopic(t *testing.T) {
+	producer := newKafkaProducer("broker-a:9092, broker-b:9092")
+	first, err := producer.writer("orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := producer.writer("orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("writer was recreated for the same topic")
+	}
+	if first.BatchTimeout != orderWriterBatchTimeout {
+		t.Fatalf("batch timeout=%v, want %v", first.BatchTimeout, orderWriterBatchTimeout)
+	}
+	other, err := producer.writer("payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == first {
+		t.Fatal("different topics must not share a writer")
+	}
+	if err := producer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(producer.writers) != 0 {
+		t.Fatalf("writers remain after close: %d", len(producer.writers))
+	}
+}
+
 func TestRedisAtomicIncrementWithTTLAndFailure(t *testing.T) {
 	c, r, keyPrefix := testRedisAtomic(t)
 	ctx := context.Background()

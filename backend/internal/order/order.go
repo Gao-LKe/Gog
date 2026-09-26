@@ -277,18 +277,22 @@ func (s *Service) reject(ctx context.Context, event contracts.OrderCreationReque
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&store.OrderCreationRequest{RequestID: event.RequestID, BuyerUserID: event.BuyerID, IdempotencyKey: event.RequestID, Status: "rejected", RejectReason: reason}).Error
 }
 
-func (s *Service) ExpirePending(ctx context.Context, limit int) error {
+func (s *Service) ExpirePending(ctx context.Context, limit int) (int, error) {
 	if s.db == nil || limit <= 0 {
-		return ErrInvalidRequest
+		return 0, ErrInvalidRequest
 	}
 	var orders []store.Order
 	if err := s.db.WithContext(ctx).Where("status = ? AND expires_at <= ?", "pending_payment", time.Now().UTC()).Order("expires_at, id").Limit(limit).Find(&orders).Error; err != nil {
-		return err
+		return 0, err
 	}
+	expired := 0
 	for _, order := range orders {
-		listingIDs, err := s.expireOne(ctx, order.ID)
+		listingIDs, changed, err := s.expireOne(ctx, order.ID)
 		if err != nil {
-			return err
+			return expired, err
+		}
+		if changed {
+			expired++
 		}
 		for _, listingID := range listingIDs {
 			if s.redis != nil {
@@ -296,11 +300,12 @@ func (s *Service) ExpirePending(ctx context.Context, limit int) error {
 			}
 		}
 	}
-	return nil
+	return expired, nil
 }
 
-func (s *Service) expireOne(ctx context.Context, orderID uint64) ([]uint64, error) {
+func (s *Service) expireOne(ctx context.Context, orderID uint64) ([]uint64, bool, error) {
 	var listingIDs []uint64
+	expired := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var order store.Order
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&order, orderID).Error; err != nil {
@@ -316,6 +321,7 @@ func (s *Service) expireOne(ctx context.Context, orderID uint64) ([]uint64, erro
 		if result.RowsAffected != 1 {
 			return nil
 		}
+		expired = true
 		var codes []store.ActivationCode
 		if err := tx.Where("reserved_order_id = ? AND status = ?", order.ID, "reserved").Find(&codes).Error; err != nil {
 			return err
@@ -332,7 +338,7 @@ func (s *Service) expireOne(ctx context.Context, orderID uint64) ([]uint64, erro
 		}
 		return tx.Model(&store.OrderItem{}).Where("order_id = ? AND status = ?", order.ID, "pending_payment").Update("status", "expired").Error
 	})
-	return listingIDs, err
+	return listingIDs, expired, err
 }
 
 func (s *Service) Available(ctx context.Context, listingID uint64) (Availability, error) {

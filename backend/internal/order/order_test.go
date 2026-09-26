@@ -61,8 +61,12 @@ func TestExpirePendingReleasesOnlyExpiredReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := NewService(db, nil, nil).ExpirePending(context.Background(), 10); err != nil {
+	expired, err := NewService(db, nil, nil).ExpirePending(context.Background(), 10)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if expired != 1 {
+		t.Fatalf("expired=%d, want 1", expired)
 	}
 	var storedOrder store.Order
 	var storedCode store.ActivationCode

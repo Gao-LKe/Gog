@@ -8,6 +8,7 @@ import (
 	"github.com/goblog/backend/internal/app"
 	"github.com/goblog/backend/internal/auth"
 	"github.com/goblog/backend/internal/config"
+	"github.com/goblog/backend/internal/contracts"
 	"github.com/goblog/backend/internal/platform"
 	"github.com/goblog/backend/internal/store"
 )
@@ -25,6 +26,12 @@ func main() {
 	if err := store.Migrate(clients.Gorm); err != nil {
 		log.Fatal(err)
 	}
+	topicCtx, cancelTopic := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := platform.EnsureOrderTopic(topicCtx, cfg.KafkaBroker, contracts.OrderCreationTopic); err != nil {
+		cancelTopic()
+		log.Fatal(err)
+	}
+	cancelTopic()
 	if err := auth.BootstrapAdmin(context.Background(), clients.Gorm, clients.Redis, clients.RedisAtomic, cfg.BootstrapAdminEmail); err != nil {
 		log.Fatal(err)
 	}
@@ -55,14 +62,24 @@ func consumeOrders(ctx context.Context, service interface {
 }
 
 func expirePendingOrders(ctx context.Context, service interface {
-	ExpirePending(context.Context, int) error
+	ExpirePending(context.Context, int) (int, error)
 }) {
-	ticker := time.NewTicker(30 * time.Second)
+	const (
+		batchSize = 500
+		interval  = time.Second
+	)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
-		if err := service.ExpirePending(ctx, 100); err != nil && ctx.Err() == nil {
+		expired, err := service.ExpirePending(ctx, batchSize)
+		if err != nil && ctx.Err() == nil {
 			log.Printf("order expiration sweep failed: %v", err)
+		}
+		// A full batch means more orders may already be overdue. Drain it before
+		// waiting for the next cadence so a short sales spike does not lock stock.
+		if err == nil && expired == batchSize {
+			continue
 		}
 		select {
 		case <-ctx.Done():

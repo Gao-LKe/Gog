@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -102,6 +104,7 @@ type Clients struct {
 	Dependencies
 	mysql *sql.DB
 	redis *redis.Client
+	kafka *kafkaProducer
 }
 
 func Open(mysqlDSN, redisAddr, kafkaBrokers string) (*Clients, error) {
@@ -119,11 +122,12 @@ func Open(mysqlDSN, redisAddr, kafkaBrokers string) (*Clients, error) {
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-	producer := NewKafkaProducer(kafkaBrokers)
+	producer := newKafkaProducer(kafkaBrokers)
 	return &Clients{
 		Dependencies: Dependencies{MySQL: db, Redis: redisAdapter{rdb}, RedisAtomic: redisAdapter{rdb}, Kafka: producer, Gorm: gormDB},
 		mysql:        db,
 		redis:        rdb,
+		kafka:        producer,
 	}, nil
 }
 
@@ -137,6 +141,9 @@ func (c *Clients) Close() error {
 	}
 	if c.mysql != nil {
 		joined = errors.Join(joined, c.mysql.Close())
+	}
+	if c.kafka != nil {
+		joined = errors.Join(joined, c.kafka.Close())
 	}
 	return joined
 }
@@ -375,9 +382,28 @@ func (r redisAdapter) Increment(ctx context.Context, key string, ttl time.Durati
 	return result, r.client.Expire(ctx, key, ttl).Err()
 }
 
-type kafkaProducer struct{ brokers []string }
+const (
+	orderWriterBatchTimeout = 5 * time.Millisecond
+	orderTopicPartitions    = 1
+	orderTopicReplication   = 1
+)
+
+type kafkaProducer struct {
+	brokers []string
+	mu      sync.Mutex
+	writers map[string]*kafka.Writer
+}
 
 func NewKafkaProducer(raw string) KafkaProducer {
+	return newKafkaProducer(raw)
+}
+
+func newKafkaProducer(raw string) *kafkaProducer {
+	brokers := kafkaBrokers(raw)
+	return &kafkaProducer{brokers: brokers, writers: make(map[string]*kafka.Writer)}
+}
+
+func kafkaBrokers(raw string) []string {
 	parts := strings.Split(raw, ",")
 	brokers := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -385,15 +411,14 @@ func NewKafkaProducer(raw string) KafkaProducer {
 			brokers = append(brokers, broker)
 		}
 	}
-	return &kafkaProducer{brokers: brokers}
+	return brokers
 }
 
 func (p *kafkaProducer) Publish(ctx context.Context, topic, key string, value []byte) error {
-	if len(p.brokers) == 0 {
-		return errors.New("kafka broker is not configured")
+	w, err := p.writer(topic)
+	if err != nil {
+		return err
 	}
-	w := &kafka.Writer{Addr: kafka.TCP(p.brokers...), Topic: topic, RequiredAcks: kafka.RequireAll}
-	defer w.Close()
 	return w.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value, Time: time.Now().UTC()})
 }
 
@@ -406,4 +431,68 @@ func (p *kafkaProducer) Ping(ctx context.Context) error {
 		return err
 	}
 	return conn.Close()
+}
+
+func (p *kafkaProducer) writer(topic string) (*kafka.Writer, error) {
+	if len(p.brokers) == 0 {
+		return nil, errors.New("kafka broker is not configured")
+	}
+	if topic == "" {
+		return nil, errors.New("kafka topic is not configured")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if writer := p.writers[topic]; writer != nil {
+		return writer, nil
+	}
+	writer := &kafka.Writer{
+		Addr:         kafka.TCP(p.brokers...),
+		Topic:        topic,
+		RequiredAcks: kafka.RequireAll,
+		BatchTimeout: orderWriterBatchTimeout,
+	}
+	p.writers[topic] = writer
+	return writer, nil
+}
+
+func (p *kafkaProducer) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var joined error
+	for topic, writer := range p.writers {
+		joined = errors.Join(joined, writer.Close())
+		delete(p.writers, topic)
+	}
+	return joined
+}
+
+// EnsureOrderTopic creates the order topic before the consumer joins its
+// group. Kafka readers that subscribe before a new topic has partitions can
+// receive an empty assignment and stay unable to process later messages.
+func EnsureOrderTopic(ctx context.Context, rawBrokers, topic string) error {
+	brokers := kafkaBrokers(rawBrokers)
+	if len(brokers) == 0 {
+		return errors.New("kafka broker is not configured")
+	}
+	if topic == "" {
+		return errors.New("kafka topic is not configured")
+	}
+	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return err
+	}
+	controller, err := conn.Controller()
+	_ = conn.Close()
+	if err != nil {
+		return err
+	}
+	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return err
+	}
+	defer controllerConn.Close()
+	return controllerConn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: orderTopicPartitions, ReplicationFactor: orderTopicReplication})
 }
