@@ -282,6 +282,9 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 	var createdOrders []paymentWork
 
 	if options.orderRate > 0 {
+		if err := primeOrderConsumer(ctx, client, baseURL, db, loaded, runID, options.drainTimeout); err != nil {
+			return err
+		}
 		observer := newLagObserver(cfg)
 		observeCtx, stopObserver := context.WithCancel(ctx)
 		observer.start(observeCtx)
@@ -329,6 +332,50 @@ func run(ctx context.Context, cfg config.Config, options runOptions) error {
 	}
 	log.Printf("load-test run completed run_id=%s result=%s", runID, options.resultPath)
 	return nil
+}
+
+// primeOrderConsumer creates and waits for one unmeasured order before queue
+// observation begins. A fresh Kafka consumer group has no committed offsets,
+// so lag sampling correctly reports it as not integrated until its first
+// message is consumed. Keeping this request outside the run ID's order prefix
+// ensures it does not affect the reported throughput, latency, or queue peak.
+func primeOrderConsumer(ctx context.Context, client *http.Client, baseURL string, db *gorm.DB, loaded profile, runID string, timeout time.Duration) error {
+	requestID := runID + "-warmup"
+	payload, _ := json.Marshal(map[string]any{"items": []map[string]any{{"listing_id": loaded.ListingID, "quantity": 1}}})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/order-requests", strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("create consumer warm-up request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+loaded.Users[0].AccessToken)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", requestID)
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("submit consumer warm-up request: %w", err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("consumer warm-up returned HTTP %d", response.StatusCode)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var orderRequest store.OrderCreationRequest
+		err := db.WithContext(ctx).Where("request_id = ?", requestID).First(&orderRequest).Error
+		if err == nil && (orderRequest.Status == "created" || orderRequest.Status == "rejected") {
+			return nil
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("read consumer warm-up status: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return errors.New("consumer warm-up did not reach a terminal order status")
 }
 
 func submitOrders(ctx context.Context, client *http.Client, baseURL string, loaded profile, runID string, rate int, duration time.Duration, maxInflight int) (phaseReport, int) {
@@ -539,7 +586,10 @@ func newLagObserver(cfg config.Config) *lagObserver {
 func (o *lagObserver) start(ctx context.Context) {
 	go func() {
 		defer close(o.done)
-		ticker := time.NewTicker(time.Second)
+		// Queue bursts can be much shorter than one second. The observer is only
+		// used by the load-test process, so a 100 ms interval gives a materially
+		// more representative sampled peak without changing production polling.
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			o.sample(ctx)
