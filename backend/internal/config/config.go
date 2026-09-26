@@ -29,6 +29,12 @@ type Config struct {
 	SMTPPassword             string
 	SMTPFrom                 string
 	BootstrapAdminEmail      string
+	AlertEmail               string
+	AlertCooldown            time.Duration
+	AlertConsecutiveSamples  int
+	AlertHTTPMinRequests     int
+	AlertHTTPErrorRate       float64
+	AlertHTTPP95             time.Duration
 	SnowflakeNodeID          int64
 	RateLimitPerIP           int
 	RealtimeMaxConnections   int
@@ -49,6 +55,11 @@ func FromEnv() Config {
 	if secret == "" {
 		secret = "change-me-in-production"
 	}
+	bootstrapAdminEmail := strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))
+	alertEmail := strings.TrimSpace(os.Getenv("ALERT_EMAIL"))
+	if alertEmail == "" {
+		alertEmail = bootstrapAdminEmail
+	}
 	return Config{
 		Environment:              valueOrDefault("APP_ENV", "development"),
 		HTTPAddr:                 addr,
@@ -66,7 +77,13 @@ func FromEnv() Config {
 		SMTPUsername:             strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
 		SMTPPassword:             strings.TrimSpace(os.Getenv("SMTP_PASSWORD")),
 		SMTPFrom:                 strings.TrimSpace(os.Getenv("SMTP_FROM")),
-		BootstrapAdminEmail:      strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL")),
+		BootstrapAdminEmail:      bootstrapAdminEmail,
+		AlertEmail:               alertEmail,
+		AlertCooldown:            durationOrDefault("ALERT_COOLDOWN", 30*time.Minute),
+		AlertConsecutiveSamples:  positiveIntOrDefault("ALERT_CONSECUTIVE_SAMPLES", 2),
+		AlertHTTPMinRequests:     positiveIntOrDefault("ALERT_HTTP_MIN_REQUESTS", 20),
+		AlertHTTPErrorRate:       ratioOrDefault("ALERT_HTTP_ERROR_RATE", 0.05),
+		AlertHTTPP95:             durationOrDefault("ALERT_HTTP_P95", 2*time.Second),
 		SnowflakeNodeID:          snowflakeNodeIDFromEnv(),
 		RateLimitPerIP:           positiveIntOrDefault("RATE_LIMIT_PER_IP", 120),
 		RealtimeMaxConnections:   positiveIntOrDefault("REALTIME_MAX_CONNECTIONS", 1000),
@@ -100,6 +117,9 @@ func (c Config) Validate() error {
 	}
 	if c.OrderConsumerWorkers <= 0 || c.OrderTopicPartitions <= 0 {
 		return errors.New("order consumer workers and topic partitions must be positive")
+	}
+	if c.AlertCooldown <= 0 || c.AlertConsecutiveSamples <= 0 || c.AlertHTTPMinRequests <= 0 || c.AlertHTTPErrorRate <= 0 || c.AlertHTTPErrorRate > 1 || c.AlertHTTPP95 <= 0 {
+		return errors.New("alert settings must be positive and HTTP error rate must not exceed 1")
 	}
 	if c.Environment != "production" {
 		return nil
@@ -148,6 +168,15 @@ func positiveIntOrDefault(key string, fallback int) int {
 	value := strings.TrimSpace(os.Getenv(key))
 	parsed, err := strconv.Atoi(value)
 	if value == "" || err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func ratioOrDefault(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	parsed, err := strconv.ParseFloat(value, 64)
+	if value == "" || err != nil || parsed <= 0 || parsed > 1 {
 		return fallback
 	}
 	return parsed

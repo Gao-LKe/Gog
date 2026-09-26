@@ -134,6 +134,45 @@ func ValidWindow(window string) (time.Duration, bool) {
 	}
 }
 
+// HTTPHealth returns the small fixed query set used by the alert evaluator.
+// A lack of completed requests is healthy but has insufficient volume for an
+// error-rate or latency alert.
+func (r *Reader) HTTPHealth(ctx context.Context) (HTTPHealth, error) {
+	if r.baseURL == "" {
+		return HTTPHealth{State: "unavailable"}, errors.New("monitoring is not configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	up, err := r.queryVector(ctx, `up{job="backend"}`)
+	if err != nil {
+		return HTTPHealth{State: "unavailable"}, err
+	}
+	if len(up) == 0 || up[0].Value == nil || *up[0].Value < 1 {
+		return HTTPHealth{State: "unavailable"}, errors.New("monitoring target is unavailable")
+	}
+	completed, err := r.queryScalar(ctx, `sum(increase(goblog_http_completed_total[5m]))`)
+	if err != nil {
+		return HTTPHealth{State: "unavailable"}, err
+	}
+	if completed == nil {
+		return HTTPHealth{State: "ok"}, nil
+	}
+	serverErrors, err := r.queryScalar(ctx, `sum(increase(goblog_http_completed_total{status_class="5xx"}[5m]))`)
+	if err != nil {
+		return HTTPHealth{State: "unavailable"}, err
+	}
+	p95MS, err := r.queryScalar(ctx, `1000 * histogram_quantile(0.95,sum by(le)(rate(goblog_http_request_duration_seconds_bucket[5m])))`)
+	if err != nil {
+		return HTTPHealth{State: "unavailable"}, err
+	}
+	health := HTTPHealth{State: "ok", Completed: rounded(completed), ServerErrors: rounded(serverErrors)}
+	if p95MS != nil {
+		value := time.Duration(*p95MS * float64(time.Millisecond))
+		health.P95 = &value
+	}
+	return health, nil
+}
+
 func (r *Reader) Overview(ctx context.Context, window string) (Overview, error) {
 	duration, ok := ValidWindow(window)
 	if !ok {

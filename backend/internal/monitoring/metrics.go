@@ -285,3 +285,17 @@ func (m *Metrics) LatestKafka() (KafkaLagSnapshot, bool) {
 	defer m.mu.RUnlock()
 	return m.latestKafka, m.hasKafka
 }
+
+func (m *Metrics) RuntimeSnapshot() RuntimeSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return RuntimeSnapshot{
+		ObservedAt:      time.Now().UTC(),
+		Kafka:           m.latestKafka,
+		HasKafka:        m.hasKafka,
+		DBSampledAt:     m.dbSampledAt,
+		HasDB:           m.hasDB,
+		DBHealthy:       m.dbHealthy,
+		ActiveConsumers: m.activeConsumers,
+	}
+}

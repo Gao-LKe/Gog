@@ -71,3 +71,31 @@ func TestOverviewRejectsFirstScrapeWithoutCounterHistory(t *testing.T) {
 		t.Fatal("a single scrape has no reliable one-minute request count")
 	}
 }
+
+func TestHTTPHealthTreatsNoTrafficAsHealthyAndReadsErrorRateInputs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		query := req.URL.Query().Get("query")
+		value := "0"
+		if strings.HasPrefix(query, `up{`) {
+			value = "1"
+		}
+		if strings.Contains(query, `sum(increase(goblog_http_completed_total[5m]))`) {
+			value = "40"
+		}
+		if strings.Contains(query, `status_class="5xx"`) {
+			value = "4"
+		}
+		if strings.Contains(query, "histogram_quantile") {
+			value = "2500"
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"result":[{"metric":{},"value":[1,"` + value + `"]}]}}`))
+	}))
+	defer server.Close()
+	health, err := NewReader(server.URL, NewMetrics()).HTTPHealth(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.State != "ok" || health.Completed != 40 || health.ServerErrors != 4 || health.P95 == nil || *health.P95 != 2500*time.Millisecond {
+		t.Fatalf("unexpected HTTP health: %+v", health)
+	}
+}

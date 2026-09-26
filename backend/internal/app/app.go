@@ -25,6 +25,8 @@ type App struct {
 	Router       *gin.Engine
 	OrderService *order.Service
 	Metrics      *monitoring.Metrics
+	Alerts       *monitoring.AlertManager
+	monitoring   *monitoring.Reader
 	deps         platform.Dependencies
 }
 
@@ -38,6 +40,18 @@ func New(cfg config.Config, deps platform.Dependencies) *App {
 	emailSender := auth.NewEmailSender(auth.EmailConfig{
 		Mode: cfg.EmailMode, Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername, Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
 	})
+	alertSender := auth.NewAlertEmailSender(auth.EmailConfig{
+		Mode: cfg.EmailMode, Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername, Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
+	})
+	monitorReader := monitoring.NewReader(cfg.PrometheusURL, metrics)
+	alerts := monitoring.NewAlertManager(monitoring.AlertConfig{
+		Recipient:          cfg.AlertEmail,
+		Cooldown:           cfg.AlertCooldown,
+		ConsecutiveSamples: cfg.AlertConsecutiveSamples,
+		HTTPMinRequests:    int64(cfg.AlertHTTPMinRequests),
+		HTTPErrorRate:      cfg.AlertHTTPErrorRate,
+		HTTPP95:            cfg.AlertHTTPP95,
+	}, alertSender)
 	authService := auth.NewService(deps.Gorm, deps.Redis, deps.RedisAtomic, emailSender, auth.ServiceConfig{
 		Secret: cfg.AuthSecret, Issuer: cfg.AuthIssuer, Audience: cfg.AuthAudience,
 		AccessTokenTTL: cfg.AccessTokenTTL, RefreshTokenTTL: cfg.RefreshTokenTTL, EmailCodeTTL: cfg.EmailCodeTTL, BootstrapAdminEmail: cfg.BootstrapAdminEmail, SnowflakeNodeID: cfg.SnowflakeNodeID,
@@ -54,21 +68,20 @@ func New(cfg config.Config, deps platform.Dependencies) *App {
 	realtime.RegisterRoutes(api, realtime.NewHub(deps.Gorm, realtime.Options{MaxConnections: cfg.RealtimeMaxConnections, FallbackCooldown: cfg.RealtimeFallbackCooldown}))
 	monitor := api.Group("/monitoring")
 	monitor.Use(auth.RequireEndpoint(auth.DefaultEndpointAuthorizer(), auth.EndpointRule{Role: auth.RoleAdmin, Permission: auth.PermissionManageSystem}))
-	reader := monitoring.NewReader(cfg.PrometheusURL, metrics)
 	monitor.GET("/overview", func(c *gin.Context) {
 		window := c.DefaultQuery("window", "5m")
 		if _, ok := monitoring.ValidWindow(window); !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid monitoring window"})
 			return
 		}
-		view, err := reader.Overview(c.Request.Context(), window)
+		view, err := monitorReader.Overview(c.Request.Context(), window)
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "monitoring data unavailable"})
 			return
 		}
 		c.JSON(http.StatusOK, view)
 	})
-	return &App{Config: cfg, Router: r, OrderService: orderService, Metrics: metrics, deps: deps}
+	return &App{Config: cfg, Router: r, OrderService: orderService, Metrics: metrics, Alerts: alerts, monitoring: monitorReader, deps: deps}
 }
 
 func readiness(deps platform.Dependencies) gin.HandlerFunc {
@@ -134,13 +147,24 @@ func (a *App) sample(ctx context.Context) {
 				pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				a.Metrics.SetDBProbe(sqlDB.PingContext(pingCtx) == nil)
 				cancel()
+			} else {
+				a.Metrics.SetDBProbe(false)
 			}
+		} else {
+			a.Metrics.SetDBProbe(false)
 		}
 		snapshot, err := monitoring.SampleKafkaLag(ctx, brokers, contracts.OrderCreationTopic, order.ConsumerGroupID, 3*time.Hour)
 		if err != nil {
 			snapshot.State = "unavailable"
 		}
 		a.Metrics.SetKafkaSample(snapshot)
+		httpHealth, healthErr := a.monitoring.HTTPHealth(ctx)
+		if healthErr != nil {
+			httpHealth.State = "unavailable"
+		}
+		for _, alertErr := range a.Alerts.Evaluate(ctx, monitoring.AlertSignals{Runtime: a.Metrics.RuntimeSnapshot(), HTTP: httpHealth}) {
+			log.Printf("monitoring alert delivery failed: %v", alertErr)
+		}
 		select {
 		case <-ctx.Done():
 			return

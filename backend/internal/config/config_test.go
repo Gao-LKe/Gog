@@ -26,3 +26,24 @@ func TestFromEnvReadsOrderWorkerSettings(t *testing.T) {
 		t.Fatalf("order workers=%d partitions=%d, want 6 and 12", cfg.OrderConsumerWorkers, cfg.OrderTopicPartitions)
 	}
 }
+
+func TestFromEnvUsesAdministratorAddressForAlerts(t *testing.T) {
+	t.Setenv("BOOTSTRAP_ADMIN_EMAIL", "admin@example.test")
+	t.Setenv("ALERT_EMAIL", "")
+	if cfg := FromEnv(); cfg.AlertEmail != "admin@example.test" {
+		t.Fatalf("alert email = %q", cfg.AlertEmail)
+	}
+}
+
+func TestFromEnvReadsAlertSettings(t *testing.T) {
+	t.Setenv("ALERT_EMAIL", "ops@example.test")
+	t.Setenv("ALERT_COOLDOWN", "45m")
+	t.Setenv("ALERT_CONSECUTIVE_SAMPLES", "3")
+	t.Setenv("ALERT_HTTP_MIN_REQUESTS", "50")
+	t.Setenv("ALERT_HTTP_ERROR_RATE", "0.1")
+	t.Setenv("ALERT_HTTP_P95", "3s")
+	cfg := FromEnv()
+	if cfg.AlertEmail != "ops@example.test" || cfg.AlertCooldown.String() != "45m0s" || cfg.AlertConsecutiveSamples != 3 || cfg.AlertHTTPMinRequests != 50 || cfg.AlertHTTPErrorRate != .1 || cfg.AlertHTTPP95.String() != "3s" {
+		t.Fatalf("unexpected alert config: %+v", cfg)
+	}
+}
