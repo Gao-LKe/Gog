@@ -23,8 +23,8 @@ const testUserID uint64 = 803113126182410001
 func TestJWTVerifier(t *testing.T) {
 	secret := "test-secret"
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": "user-1", "sid": "session-1", "typ": "access", "iss": "goblog", "aud": "goblog-api",
-		"exp": time.Now().Add(time.Minute).Unix(), "iat": time.Now().Unix(), "jti": "token-1",
+		"sub": "user-1", "sid": "session-1", "iss": "goblog", "aud": "goblog-api",
+		"exp": time.Now().Add(time.Minute).Unix(), "iat": time.Now().Unix(),
 	})
 	raw, err := token.SignedString([]byte(secret))
 	if err != nil {
@@ -33,6 +33,27 @@ func TestJWTVerifier(t *testing.T) {
 	claims, err := NewJWTVerifier(secret).Verify(raw)
 	if err != nil || claims.Subject != "user-1" || claims.SessionID != "session-1" {
 		t.Fatalf("unexpected claims: %#v, %v", claims, err)
+	}
+}
+
+func TestAccessTokenOmitsUnusedClaims(t *testing.T) {
+	service := &Service{cfg: ServiceConfig{Secret: "test-secret", Issuer: "goblog", Audience: "goblog-api", AccessTokenTTL: time.Minute}}
+	pair, err := service.tokenPair(testUserID, "session-1", "refresh-token", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := jwt.MapClaims{}
+	_, err = jwt.ParseWithClaims(pair.AccessToken, claims, func(*jwt.Token) (any, error) { return []byte(service.cfg.Secret), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"typ", "jti"} {
+		if _, exists := claims[field]; exists {
+			t.Fatalf("access token unexpectedly contains %s", field)
+		}
+	}
+	if _, err := NewJWTVerifier(service.cfg.Secret).Verify(pair.AccessToken); err != nil {
+		t.Fatalf("issued access token was rejected: %v", err)
 	}
 }
 

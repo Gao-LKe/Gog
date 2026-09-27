@@ -24,7 +24,6 @@ import (
 	"gorm.io/gorm"
 )
 
-const accessTokenType = "access"
 const registerPurpose = "register"
 const loginPurpose = "login"
 const emailCooldown = time.Minute
@@ -82,12 +81,10 @@ var passwordTimingHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad
 type Claims struct {
 	Subject   string
 	SessionID string
-	TokenType string
 }
 
 type jwtClaims struct {
 	SessionID string `json:"sid"`
-	TokenType string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -116,10 +113,10 @@ func (v *JWTVerifier) Verify(raw string) (Claims, error) {
 		}
 		return v.secret, nil
 	}, jwt.WithIssuer(v.issuer), jwt.WithAudience(v.audience), jwt.WithExpirationRequired())
-	if err != nil || !token.Valid || claims.Subject == "" || claims.SessionID == "" || claims.TokenType != accessTokenType || claims.ID == "" || claims.IssuedAt == nil {
+	if err != nil || !token.Valid || claims.Subject == "" || claims.SessionID == "" || claims.IssuedAt == nil {
 		return Claims{}, errors.New("invalid access token")
 	}
-	return Claims{Subject: claims.Subject, SessionID: claims.SessionID, TokenType: claims.TokenType}, nil
+	return Claims{Subject: claims.Subject, SessionID: claims.SessionID}, nil
 }
 
 type ServiceConfig struct {
@@ -837,8 +834,8 @@ func (s *Service) ClearPermissionRestriction(ctx context.Context, userID uint64,
 func (s *Service) tokenPair(userID uint64, sessionID, refresh string, refreshExpiresAt time.Time) (TokenPair, error) {
 	now := time.Now().UTC()
 	accessExpiresAt := now.Add(s.cfg.AccessTokenTTL)
-	access, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims{SessionID: sessionID, TokenType: accessTokenType, RegisteredClaims: jwt.RegisteredClaims{
-		Issuer: s.cfg.Issuer, Subject: strconv.FormatUint(userID, 10), Audience: []string{s.cfg.Audience}, ExpiresAt: jwt.NewNumericDate(accessExpiresAt), IssuedAt: jwt.NewNumericDate(now), ID: mustRandomID(),
+	access, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims{SessionID: sessionID, RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: s.cfg.Issuer, Subject: strconv.FormatUint(userID, 10), Audience: []string{s.cfg.Audience}, ExpiresAt: jwt.NewNumericDate(accessExpiresAt), IssuedAt: jwt.NewNumericDate(now),
 	}}).SignedString([]byte(s.cfg.Secret))
 	if err != nil {
 		return TokenPair{}, err
@@ -1232,13 +1229,6 @@ func randomDigits(count int) (string, error) {
 		raw[i] = '0' + raw[i]%10
 	}
 	return string(raw), nil
-}
-func mustRandomID() string {
-	value, err := randomToken(12)
-	if err != nil {
-		panic(err)
-	}
-	return value
 }
 
 func hashPassword(password string) ([]byte, error) {
